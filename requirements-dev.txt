@@ -9,3 +9,4 @@ pytest
 pytest-cov
 pre-commit
 pyright
+requests
