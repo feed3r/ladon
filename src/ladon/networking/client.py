@@ -59,6 +59,8 @@ class HttpClient:
         if self._config.user_agent:
             self._session.headers["User-Agent"] = self._config.user_agent
         self._session.headers.update(self._config.default_headers)
+        if self._config.proxies is not None:
+            self._session.proxies.update(self._config.proxies)
         self._robots_cache: RobotsCache | None = (
             RobotsCache(
                 self._session,

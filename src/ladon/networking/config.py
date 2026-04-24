@@ -6,6 +6,10 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Mapping
 
+_PROXY_SCHEMES = frozenset(
+    {"http", "https", "socks4", "socks4h", "socks5", "socks5h"}
+)
+
 
 def _default_headers() -> Mapping[str, str]:
     """Return immutable empty default headers mapping."""
@@ -62,6 +66,11 @@ class HttpClientConfig:
     # drawn uniformly from [0, cap] instead of always sleeping cap.  Reduces
     # thundering-herd when multiple crawlers restart simultaneously.
     backoff_jitter: bool = False
+    # Proxy map passed verbatim to requests.Session.proxies.  Follows the
+    # requests convention: {"http": "http://host:port", "https": "http://host:port"}.
+    # Accepted schemes: http, https, socks4, socks4h, socks5, socks5h.
+    # SOCKS proxies require requests[socks].
+    proxies: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         if self.retries < 0:
@@ -108,9 +117,22 @@ class HttpClientConfig:
         ):
             raise ValueError("read_timeout_seconds must be > 0 when provided")
 
-        # Freeze copied headers to avoid post-init mutation side effects.
+        # Freeze copied mappings to avoid post-init mutation side effects.
         object.__setattr__(
             self,
             "default_headers",
             MappingProxyType(dict(self.default_headers)),
         )
+        if self.proxies is not None:
+            for key, url in self.proxies.items():
+                scheme = url.split("://")[0].lower() if "://" in url else ""
+                if scheme not in _PROXY_SCHEMES:
+                    raise ValueError(
+                        f"proxies[{key!r}] must use a valid scheme "
+                        f"(http, https, socks4, socks4h, socks5, socks5h), got {url!r}"
+                    )
+            object.__setattr__(
+                self,
+                "proxies",
+                MappingProxyType(dict(self.proxies)),
+            )

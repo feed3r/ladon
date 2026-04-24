@@ -18,9 +18,10 @@ Scrapy — a proven, mature tool — is structural: instead of weakly typed
 and typed without a post-processing step. This matters when the destination
 is an LLM training pipeline or any domain where schema correctness is not optional.
 
-The built-in HTTP layer handles retries, exponential back-off, per-domain rate
-limiting, circuit breaking, and robots.txt enforcement — so adapter authors
-focus on domain logic, not infrastructure.
+The built-in HTTP layer handles retries, exponential back-off with optional
+full-jitter, 429/503 Retry-After respect, per-domain rate limiting, circuit
+breaking, proxy routing, and robots.txt enforcement — so adapter authors focus
+on domain logic, not infrastructure.
 
 ## Quick start
 
@@ -114,7 +115,10 @@ What is in v0.0.1:
 - `Repository` and `RunAudit` persistence protocols with `NullRepository`
 - `ladon run` / `ladon info` CLI
 
-What is coming in v0.1.0:
+What is coming in v0.1.0 (in progress):
+- HTTP 429/503 Retry-After respect, full-jitter backoff, static proxy routing ✓
+- Proxy rotation via `ProxyPool` protocol (issue [#79](https://github.com/MoonyFringers/ladon/issues/79))
+- HTTP authentication — Basic, Digest, OAuth client credentials (issue [#86](https://github.com/MoonyFringers/ladon/issues/86))
 - RunResult counter semantics redesign (issue [#62](https://github.com/MoonyFringers/ladon/issues/62))
 - Structured logging baseline (ADR-009)
 
