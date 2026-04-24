@@ -7,6 +7,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Static proxy support** — `HttpClientConfig(proxies={"https": "http://proxy:8080"})`
+  routes all session traffic through a proxy. Follows `requests` conventions;
+  SOCKS proxies supported when `requests[socks]` is installed. Proxy URLs are
+  validated at config construction time (scheme must be `http`, `https`, `socks4`,
+  `socks5`, or `socks5h`).
+
+- **HTTP 429 / 503 with Retry-After respect** — `HttpClientConfig(retry_on_status=...)`
+  automatically retries safe methods on configurable status codes (default `{429, 503}`).
+  The `Retry-After` header is honoured in both delta-seconds and HTTP-date forms (RFC 7231
+  §7.1.3); capped at `max_retry_after_seconds` (default 300 s). Raises `RateLimitedError`
+  when retries are exhausted.
+
+- **Full-jitter exponential backoff** — `HttpClientConfig(backoff_jitter=True)` draws
+  each retry sleep from `uniform(0, base × 2^attempt)` instead of the deterministic cap,
+  preventing thundering-herd spikes when multiple crawlers restart simultaneously.
+
+- **`RateLimitedError`** — new error class (subclass of `HttpClientError`) with
+  `status_code: int` and `retry_after: float | None` attributes; exported at both
+  `ladon.networking` and `ladon` levels.
+
+---
+
 ## [0.0.1] — 2026-04-17
 
 First public release.
