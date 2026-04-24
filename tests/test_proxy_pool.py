@@ -123,11 +123,6 @@ def test_proxies_and_proxy_pool_mutually_exclusive():
         )
 
 
-def test_config_defaults_include_proxy_pool():
-    config = HttpClientConfig()
-    assert config.proxy_pool is None
-
-
 # ============================================================
 # HttpClient — proxy rotation on transport failure
 # ============================================================
@@ -221,6 +216,44 @@ def test_proxy_pool_no_rotation_on_success():
     config = HttpClientConfig(proxy_pool=pool, retries=2)
 
     with patch("requests.Session.get", return_value=_make_ok_response()):
+        client = HttpClient(config)
+        client.get("https://example.com")
+
+    pool.next_proxy.assert_called_once()
+    pool.mark_failure.assert_not_called()
+
+
+def test_apply_proxy_none_clears_session_proxies():
+    config = HttpClientConfig()
+    client = HttpClient(config)
+    client._session.proxies["http"] = "http://old:8080"
+    client._apply_proxy(None)
+    assert "http" not in client._session.proxies
+
+
+def test_proxy_pool_rotates_on_timeout():
+    pool = MagicMock(spec=ProxyPool)
+    pool.next_proxy.side_effect = [_P1, _P2]
+    config = HttpClientConfig(proxy_pool=pool, retries=1)
+
+    timeout_err = requests.exceptions.Timeout("timed out")
+    with patch(
+        "requests.Session.get", side_effect=[timeout_err, _make_ok_response()]
+    ):
+        client = HttpClient(config)
+        client.get("https://example.com")
+
+    assert pool.next_proxy.call_count == 2
+    pool.mark_failure.assert_called_once_with(_P1)
+
+
+def test_proxy_pool_no_mark_failure_on_last_attempt():
+    pool = MagicMock(spec=ProxyPool)
+    pool.next_proxy.return_value = _P1
+    config = HttpClientConfig(proxy_pool=pool, retries=0)
+
+    conn_err = requests.exceptions.ConnectionError("refused")
+    with patch("requests.Session.get", side_effect=conn_err):
         client = HttpClient(config)
         client.get("https://example.com")
 

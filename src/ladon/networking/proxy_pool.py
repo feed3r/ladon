@@ -10,7 +10,7 @@ PROXY_SCHEMES: frozenset[str] = frozenset(
 )
 
 
-def _validate_proxy(proxy: Mapping[str, str]) -> None:
+def validate_proxy(proxy: Mapping[str, str]) -> None:
     """Raise ValueError if any URL in *proxy* has an unsupported scheme."""
     for key, url in proxy.items():
         scheme = url.split("://")[0].lower() if "://" in url else ""
@@ -53,8 +53,8 @@ class RoundRobinProxyPool:
         proxies: Ordered list of proxy mappings following the ``requests``
             convention (e.g. ``[{"https": "http://proxy1:8080"}, ...]``).
             Each mapping is validated at construction time.  An empty list
-            is accepted; ``next_proxy()`` will return ``None`` (direct
-            connection) until proxies are available.
+            is accepted; when the list is empty ``next_proxy()`` always
+            returns ``None`` (direct connection).
 
     Example::
 
@@ -67,7 +67,7 @@ class RoundRobinProxyPool:
 
     def __init__(self, proxies: list[Mapping[str, str]]) -> None:
         for proxy in proxies:
-            _validate_proxy(proxy)
+            validate_proxy(proxy)
         self._proxies: tuple[Mapping[str, str], ...] = tuple(proxies)
         self._index: int = 0
 

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Mapping
 
-from .proxy_pool import PROXY_SCHEMES
+from .proxy_pool import validate_proxy
 
 if TYPE_CHECKING:
     from .proxy_pool import ProxyPool
@@ -133,13 +133,7 @@ class HttpClientConfig:
                 "proxies and proxy_pool are mutually exclusive; set only one"
             )
         if self.proxies is not None:
-            for key, url in self.proxies.items():
-                scheme = url.split("://")[0].lower() if "://" in url else ""
-                if scheme not in PROXY_SCHEMES:
-                    raise ValueError(
-                        f"proxies[{key!r}] must use a valid scheme "
-                        f"(http, https, socks4, socks4h, socks5, socks5h), got {url!r}"
-                    )
+            validate_proxy(self.proxies)
             object.__setattr__(
                 self,
                 "proxies",
