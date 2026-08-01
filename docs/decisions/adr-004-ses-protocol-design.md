@@ -75,13 +75,27 @@ class CrawlPlugin(Protocol):
     def sink(self) -> Sink: ...
 ```
 
-The runner drives the pipeline for a single `top_ref`:
+`run_crawl()` drives the pipeline for a single `top_ref`:
 
 1. **Phase 1 — Expand**: traverse `expanders` in order; each level produces
    refs for the next.
 2. **Phase 2 — Limit**: apply `RunConfig.leaf_limit` if set.
 3. **Phase 3 — Sink**: consume each leaf ref; fire `on_leaf` callback after
    each success.
+
+For the normal whole-plugin path, `run_plugin()` calls `Source.discover()`
+once and delegates each discovered root to `run_crawl()` in source order.
+It returns a `PluginRunResult` with the individual root outcomes and aggregate
+counts. `async_run_plugin()` provides the corresponding async entry point;
+root dispatch stays ordered while each root retains `async_concurrency` for
+its leaves. This keeps `Source` an executable part of the plugin contract
+without changing the lower-level single-root API.
+
+`RunConfig.leaf_limit` remains a per-root cap: `run_plugin()` forwards the
+same configuration to every discovered root. A globally fatal error still
+propagates rather than producing a partial aggregate. Consequently, roots
+completed before a later failure may already have called `on_leaf`; persistence
+callbacks used with the whole-plugin API must be idempotent across retries.
 
 ### The three roles
 

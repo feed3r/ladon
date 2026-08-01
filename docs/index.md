@@ -22,7 +22,7 @@ plumbing.
 | robots.txt | RFC 9309 enforcement with fail-open and Crawl-delay propagation |
 | Plugin protocol | Typed `Expander` / `Sink` / `CrawlPlugin` interface |
 | Result type | `Ok` / `Err` without exceptions crossing API boundaries |
-| Async crawling | `async_run_crawl()` with `asyncio.Semaphore` concurrency control |
+| Plugin crawling | `run_plugin()` / `async_run_plugin()` with source discovery and bounded leaf concurrency |
 | Async client | `AsyncHttpClient` — full httpx-backed mirror of `HttpClient` |
 
 ## Quick start

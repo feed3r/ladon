@@ -107,14 +107,13 @@ class ShopPlugin:
 ```python
 from ladon.networking.client import HttpClient
 from ladon.networking.config import HttpClientConfig
-from ladon.runner import RunConfig, run_crawl
+from ladon.runner import RunConfig, run_plugin
 
 config = HttpClientConfig(retries=2, min_request_interval_seconds=1.0)
 client = HttpClient(config)
 plugin = ShopPlugin(client=client)
 
-result = run_crawl(
-    top_ref="https://example-shop.com/categories/electronics",
+result = run_plugin(
     plugin=plugin,
     client=client,
     config=RunConfig(leaf_limit=100),
@@ -124,6 +123,14 @@ print(f"fetched {result.leaves_consumed}, failed {result.leaves_failed}")
 client.close()
 ```
 
+`run_plugin()` calls `plugin.source.discover(client)` once and processes each
+returned root in source order. Its `PluginRunResult.results` preserves each
+root's `RunResult`; `leaf_limit` applies per root. Use `run_crawl(top_ref, ...)`
+when your application deliberately owns discovery or has one known root.
+If a later root raises a globally fatal error, earlier roots may already have
+called `on_leaf`; make persistence callbacks idempotent before retrying a
+whole-plugin run.
+
 ## Running from the CLI
 
 ```bash
@@ -132,13 +139,13 @@ ladon run --plugin mypackage.adapters:ShopPlugin \
 ```
 
 The CLI uses default `RunConfig` settings (no leaf limit, no `on_leaf`
-callback).  For production use write a Python script that calls `run_crawl`
-directly.
+callback). For production use write a Python script that usually calls
+`run_plugin()`; use `run_crawl()` when you need explicit per-root dispatch.
 
 ## Async plugins
 
 For high-concurrency crawls implement `AsyncCrawlPlugin` and call
-`async_run_crawl()` instead.  The async protocols mirror the sync ones with
+`async_run_plugin()` instead. The async protocols mirror the sync ones with
 `async def` methods and `AsyncHttpClient` as the client parameter.
 
 ```python
@@ -166,15 +173,14 @@ Run it:
 
 ```python
 import asyncio
-from ladon import AsyncHttpClient, async_run_crawl
+from ladon import AsyncHttpClient, async_run_plugin
 from ladon.networking.config import HttpClientConfig
 from ladon.runner import RunConfig
 
 async def main() -> None:
     config = HttpClientConfig(retries=2, min_request_interval_seconds=0.5)
     async with AsyncHttpClient(config) as client:
-        result = await async_run_crawl(
-            top_ref="https://example-shop.com/categories/electronics",
+        result = await async_run_plugin(
             plugin=AsyncShopPlugin(),
             client=client,
             config=RunConfig(leaf_limit=100, async_concurrency=20),
@@ -185,9 +191,9 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`async_run_crawl` accepts the same `RunConfig` as `run_crawl`.  The
+`async_run_plugin` accepts the same `RunConfig` as `run_plugin`. The
 `async_concurrency` field controls how many leaf fetches run simultaneously
-(default 10).  The sync runner ignores it.
+(within each discovered root; default 10). The sync runner ignores it.
 
 ## Error taxonomy
 

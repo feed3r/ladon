@@ -91,9 +91,11 @@ class CrawlPlan:
 
 @dataclass(frozen=True)
 class RunConfig:
-    """Configuration for a single runner invocation.
+    """Configuration for one single-root runner invocation.
 
-    ``leaf_limit`` caps the number of leaves processed; 0 means no limit.
+    ``leaf_limit`` caps the number of leaves processed by one root; 0 means
+    no limit. ``run_plugin()`` applies the same cap independently to every
+    root discovered by its source.
     ``async_concurrency`` bounds the number of concurrent leaf-processing
     slots in ``async_run_crawl`` — each slot covers the full
     ``sink.consume()`` + ``on_leaf`` pair, so slow callbacks reduce effective
@@ -143,6 +145,52 @@ class RunResult:
     leaves_persisted: int
     leaves_failed: int
     errors: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PluginRunResult:
+    """Aggregate outcome of running every top-level ref from a plugin Source.
+
+    ``top_refs`` and ``results`` have the same order and length: result ``i``
+    is the outcome for discovered ref ``i``. ``errors`` flattens each
+    per-root result's errors with its stable source-order index so callers can
+    consume a single summary without losing the individual ``RunResult``
+    values.
+
+    ``RunConfig.leaf_limit`` applies independently to each top-level run,
+    because :func:`run_plugin` delegates to :func:`run_crawl` once per
+    discovered ref. A discovery failure or an exception that is globally fatal
+    for a root keeps the existing runner semantics and propagates instead of
+    returning a partial aggregate. Earlier roots may already have invoked
+    ``on_leaf`` when a later root aborts, so callbacks passed to
+    :func:`run_plugin` must be idempotent if the caller retries the plugin.
+    """
+
+    top_refs: tuple[object, ...]
+    results: tuple[RunResult, ...]
+    leaves_consumed: int
+    leaves_persisted: int
+    leaves_failed: int
+    errors: tuple[str, ...]
+
+    @classmethod
+    def from_runs(
+        cls, top_refs: tuple[object, ...], results: tuple[RunResult, ...]
+    ) -> PluginRunResult:
+        """Build a stable aggregate from source-order per-root outcomes."""
+
+        return cls(
+            top_refs=top_refs,
+            results=results,
+            leaves_consumed=sum(result.leaves_consumed for result in results),
+            leaves_persisted=sum(result.leaves_persisted for result in results),
+            leaves_failed=sum(result.leaves_failed for result in results),
+            errors=tuple(
+                f"top_ref[{index}]: {error}"
+                for index, result in enumerate(results)
+                for error in result.errors
+            ),
+        )
 
 
 def run_crawl(
@@ -308,6 +356,48 @@ def run_crawl(
         leaves_failed=leaves_failed,
         errors=tuple(errors),
     )
+
+
+def run_plugin(
+    plugin: CrawlPlugin,
+    client: HttpClient,
+    config: RunConfig,
+    on_leaf: Callable[[object, object], None] | None = None,
+) -> PluginRunResult:
+    """Discover and run every top-level ref exposed by a sync plugin.
+
+    This is the whole-plugin counterpart to :func:`run_crawl`. It calls
+    ``plugin.source.discover(client)`` exactly once, then processes discovered
+    refs in source order by delegating to :func:`run_crawl`.
+
+    Processing roots sequentially deliberately avoids introducing a second,
+    undocumented concurrency layer. Use :func:`async_run_plugin` for async
+    adapters; it preserves this root ordering while each root's leaves retain
+    the configured ``async_concurrency``.
+
+    Args:
+        plugin:  Crawl plugin providing a source, expanders, and sink.
+        client:  Configured HttpClient instance.
+        config:  Run configuration forwarded to each discovered root.
+        on_leaf: Optional callback forwarded to each :func:`run_crawl` call.
+
+    Returns:
+        A PluginRunResult containing source-order per-root outcomes and totals.
+
+    Raises:
+        Exception: Propagates exceptions from ``source.discover`` and
+            :func:`run_crawl`. Globally fatal expansion errors are never
+            converted into a partial aggregate. Roots completed before a later
+            fatal error may already have invoked ``on_leaf``; callbacks must
+            therefore be idempotent when the caller retries the whole plugin.
+    """
+
+    top_refs = tuple(plugin.source.discover(client))
+    results = tuple(
+        run_crawl(top_ref, plugin, client, config, on_leaf=on_leaf)
+        for top_ref in top_refs
+    )
+    return PluginRunResult.from_runs(top_refs, results)
 
 
 def plan_crawl_sync(

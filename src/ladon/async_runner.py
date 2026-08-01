@@ -43,7 +43,12 @@ from ladon.plugins.errors import (
     LeafUnavailableError,
     PartialExpansionError,
 )
-from ladon.runner import CrawlPlan, RunConfig, RunResult
+from ladon.runner import (
+    CrawlPlan,
+    PluginRunResult,
+    RunConfig,
+    RunResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +235,37 @@ async def async_run_crawl(
         leaves_failed=leaves_failed,
         errors=tuple(errors),
     )
+
+
+async def async_run_plugin(
+    plugin: AsyncCrawlPlugin,
+    client: AsyncHttpClient,
+    config: RunConfig,
+    on_leaf: Callable[[object, object], Awaitable[None]] | None = None,
+) -> PluginRunResult:
+    """Discover and run every top-level ref exposed by an async plugin.
+
+    This is the whole-plugin counterpart to :func:`async_run_crawl`. It
+    awaits ``plugin.source.discover(client)`` exactly once, then processes
+    roots in source order. Each root retains the existing bounded concurrent
+    leaf processing from :func:`async_run_crawl`; roots are intentionally not
+    run concurrently so the public API has one clear concurrency boundary.
+
+    Discovery and globally-fatal per-root errors propagate unchanged rather
+    than being converted into a partial aggregate. Earlier roots may already
+    have invoked ``on_leaf`` when a later root aborts, so callbacks must be
+    idempotent if the caller retries the plugin.
+    """
+
+    top_refs = tuple(await plugin.source.discover(client))
+    results: list[RunResult] = []
+    for top_ref in top_refs:
+        results.append(
+            await async_run_crawl(
+                top_ref, plugin, client, config, on_leaf=on_leaf
+            )
+        )
+    return PluginRunResult.from_runs(top_refs, tuple(results))
 
 
 async def plan_crawl(

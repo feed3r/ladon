@@ -11,6 +11,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`run_plugin()` / `async_run_plugin()`** — source-driven whole-plugin
+  entry points. They discover roots once, preserve one `RunResult` per root,
+  and return aggregate counts and source-indexed errors in `PluginRunResult`.
 - **`rejection_info()`** — optional duck-typed extension point on
   `FetchPredicate` implementations for adding predicate-specific diagnostics
   to `predicate_rejected` decision-event metadata.

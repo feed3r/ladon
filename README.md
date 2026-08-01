@@ -96,8 +96,9 @@ ladon --version
 Exit codes: `0` success · `1` fatal error · `2` partial failures · `3` data not ready (retry later)
 
 `ladon run` uses default `HttpClientConfig` settings. For retries, rate
-limiting, circuit breaking, or a persistence layer, call `run_crawl()`
-directly from Python — see
+limiting, circuit breaking, or a persistence layer, call `run_plugin()`
+directly from Python; use `run_crawl()` when your application already owns a
+single top-level ref — see
 [`ladon-hackernews` — Use as a library](https://github.com/MoonyFringers/ladon-hackernews#use-as-a-library)
 for a full example.
 
@@ -137,21 +138,21 @@ considerations.
 
 ## Async crawling
 
-`async_run_crawl()` is the asyncio-native counterpart to `run_crawl()`.
-Phase 1 (expander traversal) runs sequentially; Phase 3 issues leaf fetches
+`async_run_plugin()` is the asyncio-native whole-plugin entry point. It
+discovers roots once and processes them in source order; for each root, Phase 1
+(expander traversal) runs sequentially and Phase 3 issues leaf fetches
 concurrently behind `asyncio.Semaphore(config.async_concurrency)` (default 10):
 
 ```python
 import asyncio
-from ladon import AsyncHttpClient, async_run_crawl
+from ladon import AsyncHttpClient, async_run_plugin
 from ladon.networking.config import HttpClientConfig
 from ladon.runner import RunConfig
 
 async def main() -> None:
     config = HttpClientConfig(retries=2, timeout_seconds=10)
     async with AsyncHttpClient(config) as client:
-        result = await async_run_crawl(
-            top_ref=my_ref,
+        result = await async_run_plugin(
             plugin=my_async_plugin,
             client=client,
             config=RunConfig(async_concurrency=20),
