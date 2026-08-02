@@ -15,7 +15,11 @@ import pytest
 from ladon.networking._async_policy_base import AsyncPolicyBase
 from ladon.networking.circuit_breaker import CircuitState
 from ladon.networking.config import HttpClientConfig
-from ladon.networking.errors import CircuitOpenError, TransientNetworkError
+from ladon.networking.errors import (
+    CircuitOpenError,
+    RateLimitedError,
+    TransientNetworkError,
+)
 from ladon.networking.types import Err, Result
 
 
@@ -82,6 +86,125 @@ class _PolicyClient(AsyncPolicyBase):
             request_fn=request_fn,
             value_builder=lambda response: response,
         )
+
+
+async def test_repeated_5xx_responses_open_circuit_at_threshold() -> None:
+    statuses = iter([500, 500])
+
+    async def attempt(url: str) -> _Response:
+        return _Response(url, status_code=next(statuses))
+
+    client = _PolicyClient(
+        HttpClientConfig(circuit_breaker_failure_threshold=2), attempt
+    )
+    url = "https://breaker-status.example/item"
+
+    first = await client.get(url)
+    assert first.ok
+    assert client.circuit_state(url) is CircuitState.CLOSED
+
+    second = await client.get(url)
+    assert second.ok
+    assert client.circuit_state(url) is CircuitState.OPEN
+
+
+async def test_2xx_response_resets_accumulated_5xx_failures() -> None:
+    statuses = iter([500, 200, 500, 500])
+
+    async def attempt(url: str) -> _Response:
+        return _Response(url, status_code=next(statuses))
+
+    client = _PolicyClient(
+        HttpClientConfig(circuit_breaker_failure_threshold=2), attempt
+    )
+    url = "https://breaker-status.example/item"
+
+    assert (await client.get(url)).ok
+    assert (await client.get(url)).ok
+    assert (await client.get(url)).ok
+    assert client.circuit_state(url) is CircuitState.CLOSED
+
+    assert (await client.get(url)).ok
+    assert client.circuit_state(url) is CircuitState.OPEN
+
+
+async def test_repeated_4xx_responses_do_not_open_circuit() -> None:
+    async def attempt(url: str) -> _Response:
+        return _Response(url, status_code=404)
+
+    client = _PolicyClient(
+        HttpClientConfig(circuit_breaker_failure_threshold=2), attempt
+    )
+    url = "https://breaker-status.example/item"
+
+    results = [await client.get(url) for _ in range(5)]
+
+    assert all(result.ok for result in results)
+    assert client.circuit_state(url) is CircuitState.CLOSED
+
+
+async def test_retryable_500_counts_once_after_retries_exhausted() -> None:
+    attempts = 0
+
+    async def attempt(url: str) -> _Response:
+        nonlocal attempts
+        attempts += 1
+        return _Response(url, status_code=500)
+
+    client = _PolicyClient(
+        HttpClientConfig(
+            retries=2,
+            retry_on_status=frozenset({500}),
+            circuit_breaker_failure_threshold=2,
+        ),
+        attempt,
+    )
+    url = "https://breaker-status.example/item"
+
+    first = await client.get(url)
+    assert not first.ok
+    assert isinstance(first.error, RateLimitedError)
+    assert first.meta["attempts"] == 3
+    assert attempts == 3
+    assert client.circuit_state(url) is CircuitState.CLOSED
+
+    second = await client.get(url)
+    assert not second.ok
+    assert isinstance(second.error, RateLimitedError)
+    assert attempts == 6
+    assert client.circuit_state(url) is CircuitState.OPEN
+
+
+async def test_retry_sequence_settling_on_5xx_counts_once() -> None:
+    statuses = iter([503, 503, 500, 500])
+    attempts = 0
+
+    async def attempt(url: str) -> _Response:
+        nonlocal attempts
+        attempts += 1
+        return _Response(url, status_code=next(statuses))
+
+    client = _PolicyClient(
+        HttpClientConfig(
+            retries=2,
+            retry_on_status=frozenset({503}),
+            circuit_breaker_failure_threshold=2,
+        ),
+        attempt,
+    )
+    url = "https://breaker-status.example/item"
+
+    first = await client.get(url)
+    assert first.ok
+    assert first.value is not None
+    assert first.value.status_code == 500
+    assert first.meta["attempts"] == 3
+    assert attempts == 3
+    assert client.circuit_state(url) is CircuitState.CLOSED
+
+    assert (await client.get(url)).ok
+    assert attempts == 4
+    assert client.circuit_state(url) is CircuitState.OPEN
 
 
 async def test_same_host_concurrent_requests_reserve_spaced_slots() -> None:

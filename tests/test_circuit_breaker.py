@@ -9,10 +9,22 @@ from unittest.mock import patch
 from urllib.parse import urlparse
 
 import pytest
+import requests
 
 from ladon.networking.circuit_breaker import CircuitBreaker, CircuitState
 from ladon.networking.client import HttpClient
 from ladon.networking.config import HttpClientConfig
+from ladon.networking.errors import RateLimitedError
+
+
+def _response(status_code: int) -> requests.Response:
+    response = requests.Response()
+    response.status_code = status_code
+    response._content = str(status_code).encode()
+    response.url = "http://breaker-status.example/item"
+    response.reason = str(status_code)
+    return response
+
 
 # ---------------------------------------------------------------------------
 # Unit — CircuitBreaker state machine
@@ -201,11 +213,123 @@ def cb_client(cb_config: HttpClientConfig) -> Generator[HttpClient, None, None]:
 
 
 class TestHttpClientCircuitBreaker:
+    def test_repeated_5xx_responses_open_circuit_at_threshold(self) -> None:
+        config = HttpClientConfig(circuit_breaker_failure_threshold=2)
+        url = "http://breaker-status.example/item"
+
+        with (
+            HttpClient(config) as client,
+            patch(
+                "requests.Session.get",
+                side_effect=[_response(500), _response(500)],
+            ),
+        ):
+            first = client.get(url)
+            assert first.ok
+            assert client.circuit_state(url) is CircuitState.CLOSED
+
+            second = client.get(url)
+            assert second.ok
+            assert client.circuit_state(url) is CircuitState.OPEN
+
+    def test_2xx_response_resets_accumulated_5xx_failures(self) -> None:
+        config = HttpClientConfig(circuit_breaker_failure_threshold=2)
+        url = "http://breaker-status.example/item"
+
+        with (
+            HttpClient(config) as client,
+            patch(
+                "requests.Session.get",
+                side_effect=[
+                    _response(500),
+                    _response(200),
+                    _response(500),
+                    _response(500),
+                ],
+            ),
+        ):
+            assert client.get(url).ok
+            assert client.get(url).ok
+            assert client.get(url).ok
+            assert client.circuit_state(url) is CircuitState.CLOSED
+
+            assert client.get(url).ok
+            assert client.circuit_state(url) is CircuitState.OPEN
+
+    def test_repeated_4xx_responses_do_not_open_circuit(self) -> None:
+        config = HttpClientConfig(circuit_breaker_failure_threshold=2)
+        url = "http://breaker-status.example/item"
+
+        with (
+            HttpClient(config) as client,
+            patch(
+                "requests.Session.get",
+                side_effect=[_response(404) for _ in range(5)],
+            ),
+        ):
+            results = [client.get(url) for _ in range(5)]
+
+            assert all(result.ok for result in results)
+            assert client.circuit_state(url) is CircuitState.CLOSED
+
+    def test_retryable_500_counts_once_after_retries_exhausted(self) -> None:
+        config = HttpClientConfig(
+            retries=2,
+            retry_on_status=frozenset({500}),
+            circuit_breaker_failure_threshold=2,
+        )
+        url = "http://breaker-status.example/item"
+
+        with (
+            HttpClient(config) as client,
+            patch(
+                "requests.Session.get",
+                side_effect=[_response(500) for _ in range(6)],
+            ),
+        ):
+            first = client.get(url)
+            assert not first.ok
+            assert isinstance(first.error, RateLimitedError)
+            assert first.meta["attempts"] == 3
+            assert client.circuit_state(url) is CircuitState.CLOSED
+
+            second = client.get(url)
+            assert not second.ok
+            assert isinstance(second.error, RateLimitedError)
+            assert client.circuit_state(url) is CircuitState.OPEN
+
+    def test_retry_sequence_settling_on_5xx_counts_once(self) -> None:
+        config = HttpClientConfig(
+            retries=2,
+            retry_on_status=frozenset({503}),
+            circuit_breaker_failure_threshold=2,
+        )
+        url = "http://breaker-status.example/item"
+
+        with (
+            HttpClient(config) as client,
+            patch(
+                "requests.Session.get",
+                side_effect=[
+                    _response(503),
+                    _response(503),
+                    _response(500),
+                    _response(500),
+                ],
+            ),
+        ):
+            first = client.get(url)
+            assert first.ok
+            assert first.meta["attempts"] == 3
+            assert first.meta["status_code"] == 500
+            assert client.circuit_state(url) is CircuitState.CLOSED
+
+            assert client.get(url).ok
+            assert client.circuit_state(url) is CircuitState.OPEN
+
     def test_circuit_opens_after_threshold_failures(
         self, cb_client: HttpClient
     ) -> None:
-        import requests
-
         from ladon.networking.errors import CircuitOpenError
 
         url = "http://failing.example.com/resource"
@@ -233,8 +357,6 @@ class TestHttpClientCircuitBreaker:
         )
 
     def test_circuit_state_reflects_open(self, cb_client: HttpClient) -> None:
-        import requests
-
         url = "http://state-check.example.com/res"
         exc = requests.exceptions.ConnectionError("refused")
 
@@ -246,8 +368,6 @@ class TestHttpClientCircuitBreaker:
 
     def test_circuit_tracks_per_host(self, cb_client: HttpClient) -> None:
         """Failures on host A must not open the circuit for host B."""
-        import requests
-
         from ladon.networking.errors import CircuitOpenError
 
         url_a = "http://failing-a.example.com/res"
@@ -272,8 +392,6 @@ class TestHttpClientCircuitBreaker:
     def test_circuit_recovers_after_success(
         self, cb_client: HttpClient
     ) -> None:
-        import requests
-
         url = "http://recovering.example.com/res"
         exc = requests.exceptions.ConnectionError("refused")
 
@@ -307,8 +425,6 @@ class TestHttpClientCircuitBreaker:
         distinguish 'circuit blocked before any attempt' from 'tried and
         failed'.
         """
-        import requests
-
         from ladon.networking.errors import CircuitOpenError
 
         url = "http://zero-attempts.example.com/res"
@@ -331,8 +447,6 @@ class TestHttpClientCircuitBreaker:
         Callers surfacing circuit state to dashboards need to observe this
         intermediate state.
         """
-        import requests
-
         url = "http://half-open.example.com/res"
         exc = requests.exceptions.ConnectionError("refused")
 

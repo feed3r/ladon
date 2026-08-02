@@ -396,7 +396,10 @@ class AsyncPolicyBase(ABC):
                         break
                     if cb is not None and admission is not None:
                         self._record_circuit_outcome(
-                            host, cb, admission, success=True
+                            host,
+                            cb,
+                            admission,
+                            success=response.status_code < 500,
                         )
                     return Ok(
                         value_builder(response),
