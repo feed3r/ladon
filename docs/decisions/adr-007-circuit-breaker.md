@@ -3,7 +3,7 @@ status: accepted
 date: 2026-03-18
 decision-makers: [Maintainers]
 informed: [Contributors]
-refs: [ADR-001, "Issue #38", "Issue #160"]
+refs: [ADR-001, ADR-002, "Issue #38", "Issue #160", "Issue #165"]
 ---
 
 # ADR-007 — Per-Host Circuit Breaker
@@ -86,6 +86,16 @@ concurrent callers cannot wake as a batch. Locks are not shared across hosts,
 and all event-loop-bound guard state is discarded when the client closes.
 Async client instances remain single-event-loop objects and must not be shared
 across threads or loops.
+
+### HTTP 5xx health-accounting amendment (2026-08-02, Issue #165)
+
+HTTP responses with `status_code >= 500` count as circuit-breaker failures;
+responses below 500 that are not configured in `retry_on_status`, including
+ordinary 4xx responses, count as successes. This origin-health accounting is
+independent of ADR-002's result contract: a 5xx response can remain `Ok(...)`
+for caller-owned status interpretation while still contributing one failure
+for the logical call sequence. Statuses handled by `retry_on_status`, including
+4xx statuses such as 429, record one failure only after retries are exhausted.
 
 ## Consequences
 

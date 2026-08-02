@@ -37,6 +37,8 @@ metadata".
 * Good: callers can define house-specific behavior for 3xx/4xx/5xx.
 * Good: metadata remains available for logging, monitoring, and policy layers.
 * Bad: callers must explicitly handle non-2xx statuses (no implicit failure).
+* Neutral: ADR-007 separately treats 5xx responses as origin-health failures
+  for circuit-breaker accounting without changing their `Ok(...)` wrapping.
 
 ### Confirmation
 

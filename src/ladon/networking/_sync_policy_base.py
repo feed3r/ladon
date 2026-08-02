@@ -413,7 +413,10 @@ class SyncPolicyBase(ABC):
                         continue
                     break
                 if cb is not None:
-                    cb.record_success()
+                    if response.status_code >= 500:
+                        cb.record_failure()
+                    else:
+                        cb.record_success()
                 return Ok(
                     value_builder(response),
                     meta=self._build_meta(
