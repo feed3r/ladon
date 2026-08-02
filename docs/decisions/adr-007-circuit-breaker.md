@@ -90,12 +90,12 @@ across threads or loops.
 ### HTTP 5xx health-accounting amendment (2026-08-02, Issue #165)
 
 HTTP responses with `status_code >= 500` count as circuit-breaker failures;
-responses below 500, including 4xx responses, count as successes. This
-origin-health accounting is independent of ADR-002's result contract: a 5xx
-response can remain `Ok(...)` for caller-owned status interpretation while
-still contributing one failure for the logical call sequence. Statuses handled
-by `retry_on_status` continue to record that failure only after retries are
-exhausted.
+responses below 500 that are not configured in `retry_on_status`, including
+ordinary 4xx responses, count as successes. This origin-health accounting is
+independent of ADR-002's result contract: a 5xx response can remain `Ok(...)`
+for caller-owned status interpretation while still contributing one failure
+for the logical call sequence. Statuses handled by `retry_on_status`, including
+4xx statuses such as 429, record one failure only after retries are exhausted.
 
 ## Consequences
 

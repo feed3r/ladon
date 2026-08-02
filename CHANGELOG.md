@@ -22,7 +22,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Circuit-breaker HTTP 5xx accounting** — returned 5xx responses now count
   as origin-health failures without changing their `Ok(...)` result contract;
-  4xx responses remain successful breaker outcomes.
+  non-retryable 4xx responses remain successful breaker outcomes.
 - **Async politeness under concurrency** — same-host requests now reserve
   rate-limit slots instead of waking in a batch, and HALF_OPEN circuit
   breakers admit exactly one probe. Both guards are cancellation-safe and
