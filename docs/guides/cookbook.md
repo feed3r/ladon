@@ -3,15 +3,16 @@
 These patterns are small, complete crawl building blocks. They use Ladon's
 current Source → Expander → Sink contracts: a source discovers root `Ref`s,
 each expander returns an `Expansion`, and the sink turns leaf refs into
-records. Replace the parsing and URLs with those for the site you are allowed
-to crawl.
+records. `run_plugin()` drives the source and each discovered root; use the
+single-root `run_crawl()` only when your caller deliberately owns dispatch.
+Replace the parsing and URLs with those for the site you are allowed to crawl.
 
 ## Flat crawl: one listing page to item records
 
 Use one expander when every page in a paginated listing contains the leaves.
 Have your `Source.discover()` return one `Ref` per page, then call
-`run_crawl()` for each returned ref. This example uses a public GitHub API
-listing page; the `page` value is context you can use in logs or persistence.
+`run_plugin()` once. This example uses a public GitHub API listing page; the
+`page` value is context you can use in logs or persistence.
 
 This example and the Hacker News tree crawl below use live external services,
 so they are verified by a weekly scheduled GitHub Actions check rather than

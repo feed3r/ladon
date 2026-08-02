@@ -39,9 +39,11 @@ jobs:
           flat_results = runpy.run_path(
               "examples/cookbook/flat_crawl.py"
           )["run_example"]()
-          if len(flat_results) != 2:
-              fail(f"GitHub example returned {len(flat_results)} runs, expected 2")
-          for index, result in enumerate(flat_results, start=1):
+          if len(flat_results.results) != 2:
+              fail(
+                  f"GitHub example returned {len(flat_results.results)} runs, expected 2"
+              )
+          for index, result in enumerate(flat_results.results, start=1):
               if result.leaves_consumed <= 0 or result.errors:
                   fail(
                       "GitHub run "

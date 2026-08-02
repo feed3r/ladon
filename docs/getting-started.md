@@ -49,7 +49,19 @@ ladon run --plugin mypackage.adapters:MyPlugin --ref https://example.com
 given reference URL.  Exit codes: 0 = success, 1 = error, 2 = partial
 failures, 3 = data not ready (retry later).  Uses default `HttpClientConfig`
 settings (30 s timeout, no retries, no rate limiting).  For fine-grained
-control call `run_crawl()` directly from Python.
+control, call `run_plugin()` directly from Python; use `run_crawl()` only when
+your application already owns one top-level ref.
+
+## Running a complete plugin from Python
+
+`run_plugin()` is the normal library entry point. It calls the plugin's
+`Source.discover()` once and returns aggregate counts plus one `RunResult` per
+discovered root. `RunConfig(leaf_limit=...)` applies to each root. If a later
+root raises a globally fatal error, earlier roots may already have persisted
+records through `on_leaf`, so make that callback idempotent before retrying.
+
+See [Authoring Plugins](guides/authoring-plugins.md) for a complete sync and
+async example.
 
 ## Configuration reference
 
@@ -121,11 +133,12 @@ the config is immutable after construction.
 
 ## Async crawling
 
-For high-throughput crawls use `async_run_crawl()` with `AsyncHttpClient`:
+For high-throughput whole-plugin crawls use `async_run_plugin()` with
+`AsyncHttpClient`:
 
 ```python
 import asyncio
-from ladon import AsyncHttpClient, async_run_crawl
+from ladon import AsyncHttpClient, async_run_plugin
 from ladon.networking.config import HttpClientConfig
 from ladon.runner import RunConfig
 
@@ -133,8 +146,7 @@ config = HttpClientConfig(retries=2, timeout_seconds=10)
 
 async def main() -> None:
     async with AsyncHttpClient(config) as client:
-        result = await async_run_crawl(
-            top_ref=my_ref,
+        result = await async_run_plugin(
             plugin=my_async_plugin,
             client=client,
             config=RunConfig(async_concurrency=20),
@@ -150,7 +162,7 @@ fetches concurrently behind `asyncio.Semaphore(async_concurrency)`.  Each
 slot covers the full `sink.consume()` + `on_leaf` pair so slow callbacks
 do not cause unbounded parallelism.
 
-`on_leaf` must be an `async def` function when used with `async_run_crawl`.
+`on_leaf` must be an `async def` function when used with `async_run_plugin`.
 
 ## Next steps
 
@@ -158,4 +170,4 @@ do not cause unbounded parallelism.
 - [Cookbook](guides/cookbook.md) — runnable patterns for common real-world crawls
 - [Authoring Plugins](guides/authoring-plugins.md) — build a site adapter
 - [API Reference → Networking](api/networking.md) — `HttpClient`, `AsyncHttpClient`, and config
-- [API Reference → Runner](api/runner.md) — `run_crawl`, `async_run_crawl`, and result types
+- [API Reference → Runner](api/runner.md) — whole-plugin and single-root runners, plus result types

@@ -13,10 +13,10 @@ from ladon import (
     HttpClient,
     HttpClientConfig,
     LeafUnavailableError,
+    PluginRunResult,
     Ref,
     RunConfig,
-    RunResult,
-    run_crawl,
+    run_plugin,
 )
 
 
@@ -60,19 +60,14 @@ class GitHubIssuesPlugin:
     sink: IssueSink = IssueSink()
 
 
-def run_example() -> list[RunResult]:
+def run_example() -> PluginRunResult:
     plugin = GitHubIssuesPlugin()
-    results: list[RunResult] = []
     with HttpClient(
         HttpClientConfig(user_agent="example-crawler/1.0")
     ) as client:
-        for page_ref in plugin.source.discover(client):
-            result = run_crawl(
-                page_ref, cast("CrawlPlugin", plugin), client, RunConfig()
-            )
-            results.append(result)
-            print(result.leaves_consumed, result.errors)
-    return results
+        result = run_plugin(cast("CrawlPlugin", plugin), client, RunConfig())
+        print(result.leaves_consumed, result.errors)
+        return result
 
 
 if __name__ == "__main__":

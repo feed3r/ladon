@@ -20,16 +20,25 @@ Source  →  [Expander, …]  →  Sink
 | **Expander** | What's inside this node? | A record + child refs |
 | **Sink** | What's at this leaf? | A final record |
 
-The runner drives the pipeline:
+For the normal whole-plugin path, call `run_plugin()` (or
+`async_run_plugin()`). Ladon calls `Source.discover()` once, dispatches the
+discovered roots in source order, and then:
 
-1. Call `Source.discover()` to get the top-level ref list.
-2. For each ref, call the first `Expander.expand()` to get its record and children.
-3. Repeat with subsequent Expanders for deeper levels.
-4. Call `Sink.consume()` on every leaf ref.
-5. Fire the `on_leaf` callback (your persistence hook) after each success.
+1. Calls the first `Expander.expand()` for each root to get its record and children.
+2. Repeats with subsequent Expanders for deeper levels.
+3. Calls `Sink.consume()` on every leaf ref.
+4. Fires the `on_leaf` callback (your persistence hook) after each success.
 
-You never write the loop. Ladon owns traversal, error counting, rate limiting,
-and the leaf limit. Your code owns the parsing.
+Ladon owns discovery, traversal, error counting, rate limiting, and the leaf
+limit. Your code owns the parsing. Use `run_crawl(top_ref, ...)` or
+`async_run_crawl(top_ref, ...)` only when your application deliberately owns
+root discovery or must process one known root. For that lower-level path, call
+`Source.discover(client)` and loop over its refs, calling `run_crawl()` once
+per ref. With the async API, discovery must be awaited: call
+`await AsyncSource.discover(client)` and loop over its refs, calling
+`async_run_crawl()` once per ref. See the [Hacker News tree-crawl cookbook
+example](cookbook.md#multi-level-tree-crawl-hacker-news) for the complete
+pattern.
 
 ## A concrete example: Hacker News
 
