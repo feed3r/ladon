@@ -47,7 +47,9 @@ class AsyncHttpClient(AsyncPolicyBase):
     Concurrent safety
     -----------------
     Safe for concurrent use within a single asyncio event loop. Do not share
-    an instance across threads.
+    an instance across threads or event loops. Same-host rate-limit slots and
+    HALF_OPEN circuit probes are coordinated; different hosts remain
+    independent.
     """
 
     def __init__(self, config: HttpClientConfig) -> None:
@@ -86,7 +88,10 @@ class AsyncHttpClient(AsyncPolicyBase):
 
     async def aclose(self) -> None:
         """Close the underlying httpx client and release connections."""
-        await self._http.aclose()
+        try:
+            await self._http.aclose()
+        finally:
+            self._clear_concurrency_state()
 
     # ------------------------------------------------------------------
     # httpx API delta converters — the blast-radius boundary

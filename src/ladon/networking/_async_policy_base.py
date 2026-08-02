@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from random import uniform
@@ -37,6 +38,14 @@ from .types import Err, Ok, Result
 ResponseValue = TypeVar("ResponseValue")
 
 
+@dataclass(frozen=True)
+class _CircuitAdmission:
+    """Generation-scoped permission for one logical request."""
+
+    generation: int
+    is_half_open_probe: bool
+
+
 class AsyncPolicyBase(ABC):
     """Abstract base for asynchronous HTTP clients with unified policy pipeline.
 
@@ -47,7 +56,10 @@ class AsyncPolicyBase(ABC):
     def __init__(self, config: HttpClientConfig) -> None:
         self._config = config
         self._last_request_time: dict[str, float] = {}
+        self._rate_limit_locks: dict[str, asyncio.Lock] = {}
         self._circuit_breakers: dict[str, CircuitBreaker] = {}
+        self._circuit_generations: dict[str, int] = {}
+        self._half_open_probes: dict[str, int] = {}
         self._crawl_delay_overrides: dict[str, float] = {}
 
     async def __aenter__(self) -> Self:
@@ -152,9 +164,14 @@ class AsyncPolicyBase(ABC):
     async def _enforce_rate_limit(self, host: str) -> None:
         """Enforce per-host politeness delay before issuing a request.
 
-        Only waits — does not stamp ``_last_request_time``.  All stamping is
-        done by the ``_request`` loop's ``finally`` block so that every actual
-        attempt (including retries) updates the timestamp.
+        Concurrent callers reserve start slots while holding a host-specific
+        lock. The reservation is committed before the lock is released, so a
+        burst cannot observe one stale timestamp and wake as a batch. Actual
+        attempt completion is still stamped by ``_request`` to preserve the
+        existing conservative end-to-start delay for sequential calls.
+
+        A task cancelled while waiting never commits a reservation, and the
+        ``async with`` block releases the lock for the next waiter.
         """
         if not host:
             return
@@ -164,12 +181,19 @@ class AsyncPolicyBase(ABC):
         )
         if interval <= 0:
             return
-        last = self._last_request_time.get(host)
-        if last is not None:
-            elapsed = monotonic() - last
-            remaining = interval - elapsed
-            if remaining > 0:
-                await asyncio.sleep(remaining)
+
+        lock = self._rate_limit_locks.get(host)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._rate_limit_locks[host] = lock
+        async with lock:
+            last = self._last_request_time.get(host)
+            if last is not None:
+                elapsed = monotonic() - last
+                remaining = interval - elapsed
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+            self._last_request_time[host] = monotonic()
 
     def _get_circuit_breaker(self, host: str) -> CircuitBreaker | None:
         """Return the CircuitBreaker for *host*, or None if circuit breaking is disabled."""
@@ -184,6 +208,81 @@ class AsyncPolicyBase(ABC):
                 recovery_seconds=self._config.circuit_breaker_recovery_seconds,
             )
         return self._circuit_breakers[host]
+
+    def _admit_circuit_request(
+        self, host: str, cb: CircuitBreaker
+    ) -> _CircuitAdmission | None:
+        """Atomically admit one request in this client's asyncio event loop.
+
+        No await occurs while breaker state and the probe reservation are
+        inspected, so cooperative asyncio scheduling makes this section
+        atomic. CLOSED traffic remains concurrent. Once OPEN recovers, one
+        caller reserves the HALF_OPEN probe and later callers are rejected
+        until that probe records an outcome or is cancelled.
+        """
+        if host in self._half_open_probes:
+            return None
+
+        previous_state = cb.state
+        if not cb.allow_request():
+            return None
+
+        generation = self._circuit_generations.get(host, 0)
+        is_half_open_probe = cb.state is CircuitState.HALF_OPEN
+        if is_half_open_probe:
+            if previous_state is CircuitState.OPEN:
+                generation += 1
+                self._circuit_generations[host] = generation
+            self._half_open_probes[host] = generation
+
+        return _CircuitAdmission(
+            generation=generation,
+            is_half_open_probe=is_half_open_probe,
+        )
+
+    def _record_circuit_outcome(
+        self,
+        host: str,
+        cb: CircuitBreaker,
+        admission: _CircuitAdmission,
+        *,
+        success: bool,
+    ) -> None:
+        """Record an outcome only if it belongs to the current generation."""
+        current_generation = self._circuit_generations.get(host, 0)
+        if admission.generation != current_generation:
+            return
+
+        previous_state = cb.state
+        if success:
+            cb.record_success()
+        else:
+            cb.record_failure()
+
+        if (
+            admission.is_half_open_probe
+            and self._half_open_probes.get(host) == admission.generation
+        ):
+            self._half_open_probes.pop(host, None)
+
+        if cb.state is not previous_state:
+            self._circuit_generations[host] = current_generation + 1
+
+    def _release_circuit_admission(
+        self, host: str, admission: _CircuitAdmission
+    ) -> None:
+        """Release a cancelled HALF_OPEN probe without recording an outcome."""
+        if (
+            admission.is_half_open_probe
+            and self._half_open_probes.get(host) == admission.generation
+        ):
+            self._half_open_probes.pop(host, None)
+
+    def _clear_concurrency_state(self) -> None:
+        """Drop event-loop-bound guards when the transport is closed."""
+        self._rate_limit_locks.clear()
+        self._half_open_probes.clear()
+        self._circuit_generations.clear()
 
     def circuit_state(self, url: str) -> CircuitState | None:
         """Return the current circuit-breaker state for *url*'s host, or None."""
@@ -244,126 +343,144 @@ class AsyncPolicyBase(ABC):
         """Execute async request with retries, circuit breaking, and rate limiting."""
         host = urlparse(url).netloc
         cb = self._get_circuit_breaker(host)
-        if cb is not None and not cb.allow_request():
-            meta = self._build_meta(
-                method=method,
-                request_url=url,
-                response=None,
-                context=context,
-                attempts=0,
-                timeout=timeout,
-                final_error="CircuitOpenError",
-            )
-            return Err(CircuitOpenError(host), meta=meta)
-
-        await self._enforce_rate_limit(host)
-        is_safe_method = method.upper() in {"GET", "HEAD"}
-        pool = self._config.proxy_pool
-        attempts = 0
-        last_error: Exception | None = None
-        last_blocked_response: Any = None
-        last_blocked_retry_after: float | None = None
-        current_proxy: Mapping[str, str] | None = None
-        if pool is not None:
-            current_proxy = pool.next_proxy()
-
-        for _ in range(self._max_attempts()):
-            attempts += 1
-            try:
-                response = await self._execute_attempt(
-                    request_fn, current_proxy
+        admission: _CircuitAdmission | None = None
+        if cb is not None:
+            admission = self._admit_circuit_request(host, cb)
+            if admission is None:
+                meta = self._build_meta(
+                    method=method,
+                    request_url=url,
+                    response=None,
+                    context=context,
+                    attempts=0,
+                    timeout=timeout,
+                    final_error="CircuitOpenError",
                 )
-                if (
-                    response.status_code in self._config.retry_on_status
-                    and is_safe_method
-                ):
-                    last_blocked_retry_after = self._parse_retry_after(response)
-                    last_blocked_response = response
-                    last_error = None
-                    if attempts < self._max_attempts():
-                        if pool is not None:
-                            pool.mark_failure(current_proxy)
-                            current_proxy = pool.next_proxy()
-                        await self._sleep_for_retry_after(
-                            last_blocked_retry_after, attempts
+                return Err(CircuitOpenError(host), meta=meta)
+
+        try:
+            await self._enforce_rate_limit(host)
+            is_safe_method = method.upper() in {"GET", "HEAD"}
+            pool = self._config.proxy_pool
+            attempts = 0
+            last_error: Exception | None = None
+            last_blocked_response: Any = None
+            last_blocked_retry_after: float | None = None
+            current_proxy: Mapping[str, str] | None = None
+            if pool is not None:
+                current_proxy = pool.next_proxy()
+
+            for _ in range(self._max_attempts()):
+                attempts += 1
+                try:
+                    response = await self._execute_attempt(
+                        request_fn, current_proxy
+                    )
+                    if (
+                        response.status_code in self._config.retry_on_status
+                        and is_safe_method
+                    ):
+                        last_blocked_retry_after = self._parse_retry_after(
+                            response
                         )
-                        continue
-                    break
-                if cb is not None:
-                    cb.record_success()
-                return Ok(
-                    value_builder(response),
-                    meta=self._build_meta(
-                        method=method,
-                        request_url=url,
-                        response=response,
-                        context=context,
-                        attempts=attempts,
-                        timeout=timeout,
-                    ),
-                )
-            except Exception as exc:
-                if not self._is_transport_exception(exc):  # pragma: no cover
-                    if cb is not None:
-                        cb.record_failure()
-                    return Err(
-                        HttpClientError(str(exc)),
+                        last_blocked_response = response
+                        last_error = None
+                        if attempts < self._max_attempts():
+                            if pool is not None:
+                                pool.mark_failure(current_proxy)
+                                current_proxy = pool.next_proxy()
+                            await self._sleep_for_retry_after(
+                                last_blocked_retry_after, attempts
+                            )
+                            continue
+                        break
+                    if cb is not None and admission is not None:
+                        self._record_circuit_outcome(
+                            host, cb, admission, success=True
+                        )
+                    return Ok(
+                        value_builder(response),
                         meta=self._build_meta(
                             method=method,
                             request_url=url,
-                            response=None,
+                            response=response,
                             context=context,
                             attempts=attempts,
                             timeout=timeout,
-                            final_error=type(exc).__name__,
                         ),
                     )
-                last_error = exc
-                last_blocked_response = None
-                last_blocked_retry_after = None
-                if (
-                    attempts >= self._max_attempts()
-                    or not self._is_retryable_exception(method, exc)
-                ):
-                    break
+                except Exception as exc:
+                    if not self._is_transport_exception(
+                        exc
+                    ):  # pragma: no cover
+                        if cb is not None and admission is not None:
+                            self._record_circuit_outcome(
+                                host, cb, admission, success=False
+                            )
+                        return Err(
+                            HttpClientError(str(exc)),
+                            meta=self._build_meta(
+                                method=method,
+                                request_url=url,
+                                response=None,
+                                context=context,
+                                attempts=attempts,
+                                timeout=timeout,
+                                final_error=type(exc).__name__,
+                            ),
+                        )
+                    last_error = exc
+                    last_blocked_response = None
+                    last_blocked_retry_after = None
+                    if (
+                        attempts >= self._max_attempts()
+                        or not self._is_retryable_exception(method, exc)
+                    ):
+                        break
+                    if pool is not None:
+                        pool.mark_failure(current_proxy)
+                        current_proxy = pool.next_proxy()
+                    await self._sleep_between_attempts(attempts)
+                finally:
+                    if host:
+                        self._last_request_time[host] = monotonic()
+
+            if last_blocked_response is not None:
+                if cb is not None and admission is not None:
+                    self._record_circuit_outcome(
+                        host, cb, admission, success=False
+                    )
                 if pool is not None:
                     pool.mark_failure(current_proxy)
-                    current_proxy = pool.next_proxy()
-                await self._sleep_between_attempts(attempts)
-            finally:
-                if host:
-                    self._last_request_time[host] = monotonic()
+                return Err(
+                    RateLimitedError(
+                        last_blocked_response.status_code,
+                        last_blocked_retry_after,
+                    ),
+                    meta=self._build_meta(
+                        method=method,
+                        request_url=url,
+                        response=last_blocked_response,
+                        context=context,
+                        attempts=attempts,
+                        timeout=timeout,
+                        final_error="RateLimitedError",
+                    ),
+                )
 
-        if last_blocked_response is not None:
-            if cb is not None:
-                cb.record_failure()
+            assert last_error is not None
+            if cb is not None and admission is not None:
+                self._record_circuit_outcome(host, cb, admission, success=False)
             if pool is not None:
                 pool.mark_failure(current_proxy)
-            return Err(
-                RateLimitedError(
-                    last_blocked_response.status_code, last_blocked_retry_after
-                ),
-                meta=self._build_meta(
-                    method=method,
-                    request_url=url,
-                    response=last_blocked_response,
-                    context=context,
-                    attempts=attempts,
-                    timeout=timeout,
-                    final_error="RateLimitedError",
-                ),
+            return self._handle_request_exception(
+                method=method,
+                request_url=url,
+                e=last_error,
+                context=context,
+                attempts=attempts,
+                timeout=timeout,
             )
-
-        assert last_error is not None
-        if cb is not None:
-            cb.record_failure()
-        if pool is not None:
-            pool.mark_failure(current_proxy)
-        return self._handle_request_exception(
-            method=method,
-            request_url=url,
-            e=last_error,
-            context=context,
-            attempts=attempts,
-            timeout=timeout,
-        )
+        finally:
+            if admission is not None:
+                self._release_circuit_admission(host, admission)

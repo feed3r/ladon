@@ -18,6 +18,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `FetchPredicate` implementations for adding predicate-specific diagnostics
   to `predicate_rejected` decision-event metadata.
 
+### Fixed
+
+- **Async politeness under concurrency** — same-host requests now reserve
+  rate-limit slots instead of waking in a batch, and HALF_OPEN circuit
+  breakers admit exactly one probe. Both guards are cancellation-safe and
+  remain independent across hosts.
+
 ---
 
 ## [0.3.2] — 2026-06-08

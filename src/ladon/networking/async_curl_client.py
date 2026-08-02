@@ -50,7 +50,9 @@ class AsyncCurlHttpClient(AsyncPolicyBase):
     Concurrent safety
     -----------------
     Safe for concurrent use within a single asyncio event loop. Do not share
-    an instance across threads.
+    an instance across threads or event loops. Same-host rate-limit slots and
+    HALF_OPEN circuit probes are coordinated; different hosts remain
+    independent.
 
     Args:
         config: Standard ``HttpClientConfig``.
@@ -99,7 +101,10 @@ class AsyncCurlHttpClient(AsyncPolicyBase):
 
     async def aclose(self) -> None:
         """Close the underlying session and release pooled connections."""
-        await self._session.close()
+        try:
+            await self._session.close()
+        finally:
+            self._clear_concurrency_state()
 
     def _get_timeout(
         self, override: float | None

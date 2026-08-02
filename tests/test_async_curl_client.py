@@ -684,14 +684,13 @@ async def test_rate_limit_sleep_enforced() -> None:
     )
     async with AsyncCurlHttpClient(config, impersonate="chrome136") as c:
         c._session.get = AsyncMock(return_value=_mock_response(content=b"ok"))
-        # Interval is measured end-to-start: timestamp written in finally after each attempt.
-        # First get() completes  → finally records 1000.0
-        # Second get() enforces  → now=1000.5, elapsed=0.5, remaining=1.5 → sleep(1.5)
-        # Second get() completes → finally records 1001.0
+        # The first request reserves 1000.0 and completes at 1000.1.
+        # The second checks at 1000.5, waits 1.6, reserves 1002.1, then
+        # completes at 1002.2.
         with (
             patch(
                 "ladon.networking._async_policy_base.monotonic",
-                side_effect=[1000.0, 1000.5, 1001.0],
+                side_effect=[1000.0, 1000.1, 1000.5, 1002.1, 1002.2],
             ),
             patch(
                 "ladon.networking._async_policy_base.asyncio.sleep"
@@ -701,4 +700,4 @@ async def test_rate_limit_sleep_enforced() -> None:
             await c.get("http://example.com")
             await c.get("http://example.com")
 
-    mock_sleep.assert_called_once_with(pytest.approx(1.5, abs=1e-9))
+    mock_sleep.assert_called_once_with(pytest.approx(1.6, abs=1e-9))
