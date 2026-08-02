@@ -25,7 +25,7 @@ with HttpClient(config) as client:
     result = client.get("https://httpbin.org/get")
     if result.ok:
         print(result.value)       # response bytes
-        print(result.meta["status"])  # HTTP status code
+        print(result.meta["status_code"])  # HTTP status code
     else:
         print("error:", result.error)
 ```
