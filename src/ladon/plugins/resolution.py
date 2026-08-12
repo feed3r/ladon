@@ -12,7 +12,10 @@ The loop pattern
     for source in sources (ordered best-first):
         if not _should_try_source(source, ref):   # tier-skip, guards
             continue
-        data = _fetch_from_source(source, ref, client)
+        try:
+            data = _fetch_from_source(source, ref, client)
+        except recoverable source error:
+            continue                              # unexpected errors propagate
         if not data:
             continue                               # source returned nothing / empty bytes
         if _is_better_candidate(data, ...):        # update best-seen fallback
@@ -36,7 +39,9 @@ from datetime import datetime, timezone
 from typing import Any, Protocol, Sequence, runtime_checkable
 
 from ..networking.client import HttpClient
+from ..networking.errors import HttpClientError
 from ..observability import DecisionEvent, DecisionTracker, NullDecisionTracker
+from .errors import LeafUnavailableError
 from .models import Ref
 
 logger = logging.getLogger(__name__)
@@ -97,6 +102,12 @@ class MultiSourceSink:
         Fallback selection. Default: first non-empty result wins. Override for
         domain-specific ranking (e.g., prefer wider images when multiple
         below-threshold results exist).
+
+    ``_all_predicates_pass(data, ref) → bool``
+        Acceptance customization when at least one predicate is registered.
+        Default: all registered predicates must accept. Override to add
+        criteria beyond the registered predicates. The predicate-free fast
+        path accepts the first non-empty result without calling this hook.
 
     ``_fetch_from_source(source, ref, client) → bytes | None``
         Calls the source's native interface. Must be overridden; there is no
@@ -177,9 +188,24 @@ class MultiSourceSink:
     # Loop
     # ------------------------------------------------------------------
 
+    def _first_failing_predicate(
+        self, data: bytes, ref: Ref
+    ) -> FetchPredicate | None:
+        """Return the first registered predicate that rejects *data*, evaluating
+        each predicate at most once. Returns None if every predicate accepts
+        (or none are registered)."""
+        for p in self._ms_predicates:
+            if not p.accepts(data, ref):
+                return p
+        return None
+
     def _all_predicates_pass(self, data: bytes, ref: Ref) -> bool:
-        """Return True if *data* satisfies every registered predicate."""
-        return all(p.accepts(data, ref) for p in self._ms_predicates)
+        """Return True if *data* satisfies every registered predicate.
+
+        Override to add acceptance criteria beyond registered predicates.
+        This hook is not called when no predicates are registered.
+        """
+        return self._first_failing_predicate(data, ref) is None
 
     def resolve_multi(
         self, ref: Ref, client: HttpClient, *, run_id: str = ""
@@ -195,13 +221,12 @@ class MultiSourceSink:
         correlation; omit it to get a fresh UUID scoped to this resolution.
 
         .. note::
-            Exceptions raised by :meth:`_fetch_from_source` (other than
-            :exc:`NotImplementedError`) are caught, recorded as a
-            ``source_failed`` event, and the loop continues to the next
-            source. :exc:`NotImplementedError` is re-raised immediately so
-            the "subclass must override" contract is preserved. This differs
-            from the pre-tracker behaviour, where all exceptions propagated
-            to the caller.
+            :class:`~ladon.networking.errors.HttpClientError` and
+            :class:`~ladon.plugins.errors.LeafUnavailableError` raised by
+            :meth:`_fetch_from_source` are recorded as ``source_failed`` and
+            the loop continues to the next source. Other exceptions propagate;
+            :exc:`NotImplementedError` is re-raised immediately so the
+            "subclass must override" contract is preserved.
         """
         _run_id = run_id or str(uuid.uuid4())
         best_data: bytes | None = None
@@ -232,7 +257,7 @@ class MultiSourceSink:
                 data = self._fetch_from_source(source, ref, client)
             except NotImplementedError:
                 raise
-            except Exception as exc:
+            except (HttpClientError, LeafUnavailableError) as exc:
                 self._tracker.record(
                     DecisionEvent(
                         run_id=_run_id,
@@ -299,7 +324,32 @@ class MultiSourceSink:
                     )
                 )
 
-            if not self._ms_predicates or self._all_predicates_pass(data, ref):
+            if not self._ms_predicates:
+                accepted, failing = True, None
+            else:
+                predicate_check = self._all_predicates_pass
+                if (
+                    getattr(predicate_check, "__func__", None)
+                    is MultiSourceSink._all_predicates_pass
+                ):
+                    # Default path: one evaluation pass serves both the accept
+                    # decision and (on rejection) the failing predicate's identity
+                    # for metadata.
+                    failing = self._first_failing_predicate(data, ref)
+                    accepted = failing is None
+                else:
+                    # A dynamically resolved _all_predicates_pass override has
+                    # logic we can't introspect; call it for the decision. Only
+                    # re-scan registered predicates (a second, unavoidable pass)
+                    # to attribute the rejection if it rejects.
+                    accepted = predicate_check(data, ref)
+                    failing = (
+                        None
+                        if accepted
+                        else self._first_failing_predicate(data, ref)
+                    )
+
+            if accepted:
                 self._tracker.record(
                     DecisionEvent(
                         run_id=_run_id,
@@ -318,13 +368,8 @@ class MultiSourceSink:
                 )
                 return data, source
 
-            # Find the first registered predicate that rejects the data.
-            # If none is found (failing is None), the rejection came from a
+            # If failing is None, the rejection came from an
             # _all_predicates_pass override rather than a registered predicate.
-            failing = next(
-                (p for p in self._ms_predicates if not p.accepts(data, ref)),
-                None,
-            )
             predicate_name = (
                 type(failing).__name__
                 if failing is not None

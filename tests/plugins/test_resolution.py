@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from ladon.plugins.errors import AssetDownloadError
 from ladon.plugins.models import Ref
 from ladon.plugins.resolution import (
     FetchPredicate,
@@ -167,6 +168,37 @@ class TestMultiSourceSinkLoop:
         assert src is None
         assert s.calls == 0
 
+    @pytest.mark.parametrize("error_type", [AttributeError, TypeError])
+    def test_programmer_error_from_fetch_propagates(
+        self, error_type: type[Exception]
+    ) -> None:
+        class _BrokenSink(_SimpleSink):
+            def _fetch_from_source(
+                self,
+                source: _SimpleSource,
+                ref: Ref,
+                client: object,  # noqa: ARG002
+            ) -> bytes | None:
+                raise error_type("broken override")
+
+        sink = _BrokenSink(sources=[_SimpleSource("a", b"DATA")])
+        with pytest.raises(error_type, match="broken override"):
+            sink.resolve_multi(_ref(), MagicMock())
+
+    def test_asset_download_error_from_fetch_propagates(self) -> None:
+        class _BrokenSink(_SimpleSink):
+            def _fetch_from_source(
+                self,
+                source: _SimpleSource,
+                ref: Ref,
+                client: object,  # noqa: ARG002
+            ) -> bytes | None:
+                raise AssetDownloadError("fatal download failure")
+
+        sink = _BrokenSink(sources=[_SimpleSource("a", b"DATA")])
+        with pytest.raises(AssetDownloadError, match="fatal download failure"):
+            sink.resolve_multi(_ref(), MagicMock())
+
 
 # ---------------------------------------------------------------------------
 # MultiSourceSink — predicate integration
@@ -237,6 +269,23 @@ class TestMultiSourceSinkPredicates:
         _, src = sink.resolve_multi(_ref(), MagicMock())
         assert src is s1
         assert s2.calls == 0
+
+    def test_rejecting_predicate_is_called_once_per_source(self) -> None:
+        class _CountingPredicate:
+            def __init__(self) -> None:
+                self.call_count = 0
+
+            def accepts(self, data: bytes, ref: Ref) -> bool:  # noqa: ARG002
+                self.call_count += 1
+                return False
+
+        predicate = _CountingPredicate()
+        sink = _SimpleSink(
+            sources=[_SimpleSource("a", b"DATA")],
+            predicates=[predicate],
+        )
+        sink.resolve_multi(_ref(), MagicMock())
+        assert predicate.call_count == 1
 
 
 # ---------------------------------------------------------------------------
