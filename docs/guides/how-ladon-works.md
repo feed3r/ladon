@@ -112,10 +112,14 @@ specific meaning that tells the runner exactly what to do:
 | `ExpansionNotReadyError` | Resource not ready yet | Abort the run; retry next schedule |
 | `PartialExpansionError` | Child list incomplete | **First expander:** abort the run (re-raised to caller). **Non-first expander:** log and skip the branch. |
 | `ChildListUnavailableError` | Child list unreachable | **First expander:** abort the run (re-raised to caller). **Non-first expander:** log and skip the branch. |
-| `LeafUnavailableError` | Leaf fetch failed | Log, skip this leaf, continue |
+| `LeafUnavailableError` | Leaf fetch failed | Log, record the failure, and continue, as for other non-fatal Sink exceptions |
 
-Your plugin raises the right exception; the runner decides what to do with it.
-No catch-all `except Exception` that masks real bugs.
+Your plugin raises the right typed exception when it can. During leaf
+processing, the runner also records unexpected `Exception` text in
+`RunResult.errors` and continues with independent leaves, so a single bad leaf
+does not discard the rest of the crawl. Explicitly fatal
+`AssetDownloadError`, cancellation, and other `BaseException` subclasses still
+propagate to the caller.
 
 ## Persistence is injected, not built in
 

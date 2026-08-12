@@ -1,8 +1,8 @@
 """Error taxonomy for Ladon house plugins.
 
-Each exception maps to a specific runner behaviour. Keeping these
-distinct prevents the catch-all except-Exception pattern that masked
-real failures in pre-Ladon crawlers.
+Each exception maps to a specific runner behaviour. Expansion signals remain
+typed because they describe tree completeness; non-fatal Phase-3 exceptions
+are recorded independently so one bad leaf does not discard the rest of a run.
 """
 
 
@@ -25,7 +25,8 @@ class PartialExpansionError(PluginError):
 
     Runner behaviour: non-fatal for non-first expanders — the affected
     branch is isolated and recorded in ``RunResult.errors``. Propagates
-    unchanged from the first expander.
+    unchanged from the first expander. Always fatal from a Sink because
+    Phase 3 has no branch to isolate.
 
     Raise this instead of ``ChildListUnavailableError`` when the HTTP
     response was valid but the payload signals an incomplete result.
@@ -39,6 +40,7 @@ class ChildListUnavailableError(PluginError):
 
     Fatal for this ref's run. Raised when the network request succeeded
     but the response cannot be parsed into a usable child list.
+    Always fatal from a Sink because Phase 3 has no branch to isolate.
     """
 
 
@@ -51,9 +53,9 @@ class LeafUnavailableError(PluginError):
 
 
 # ---------------------------------------------------------------------------
-# Plugin-use errors NOT caught by the runner
+# Plugin-use errors NOT recovered from by the runner
 # ---------------------------------------------------------------------------
-# Unlike the errors above, AssetDownloadError is not handled by run_crawl().
+# Unlike the errors above, the runners do not recover from AssetDownloadError.
 # If raised from a Sink or Expander it propagates as a fatal error and aborts
 # the entire run.  Plugins that need non-fatal asset download handling must
 # catch it internally before returning.
@@ -63,7 +65,7 @@ class LeafUnavailableError(PluginError):
 class AssetDownloadError(PluginError):
     """An asset download failed.
 
-    **Not caught by the runner** — propagates as a fatal error that aborts
-    the run.  Plugins requiring non-fatal handling must catch this exception
-    internally before returning from the Sink or Expander.
+    **Not recovered from by the runner** — propagates as a fatal error that
+    aborts the run. Plugins requiring non-fatal handling must catch this
+    exception internally before returning from the Sink or Expander.
     """

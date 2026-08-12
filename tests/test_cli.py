@@ -1,4 +1,5 @@
-# pyright: reportUnknownMemberType=false, reportUnknownVariableType=false
+# pyright: reportPrivateUsage=false, reportUnknownMemberType=false
+# pyright: reportUnknownVariableType=false
 # pyright: reportUnknownParameterType=false
 """Tests for the ladon CLI (ladon.cli)."""
 
@@ -8,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ladon.cli import build_parser, load_plugin_class, main
+from ladon.cli import _cmd_run, build_parser, load_plugin_class, main
 
 # ---------------------------------------------------------------------------
 # load_plugin_class
@@ -305,3 +306,91 @@ class TestMainDispatch:
             with pytest.raises(SystemExit) as exc_info:
                 main()
         assert exc_info.value.code == 2
+
+    def test_run_exits_2_on_real_sink_consume_exception(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from ladon.plugins.models import Expansion
+
+        class _Expander:
+            def expand(self, ref: object, client: object) -> Expansion:
+                return Expansion(record=object(), child_refs=("leaf-1",))
+
+        class _Sink:
+            def consume(self, ref: object, client: object) -> object:
+                raise RuntimeError("leaf parser exploded")
+
+        class _Plugin:
+            name = "cli-test-plugin"
+            source = object()
+
+            def __init__(self, *, client: object) -> None:
+                self.expanders = (_Expander(),)
+                self.sink = _Sink()
+
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "ladon",
+                    "run",
+                    "--plugin",
+                    "pkg:Cls",
+                    "--ref",
+                    "http://x.com",
+                ],
+            ),
+            patch("ladon.cli.load_plugin_class", return_value=_Plugin),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+
+        assert exc_info.value.code == 2
+        assert "leaf parser exploded" in capsys.readouterr().out
+
+    def test_run_exits_1_on_real_sink_asset_download_error(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from ladon.plugins.errors import AssetDownloadError
+        from ladon.plugins.models import Expansion
+
+        class _Expander:
+            def expand(self, ref: object, client: object) -> Expansion:
+                return Expansion(record=object(), child_refs=("leaf-1",))
+
+        class _Sink:
+            def consume(self, ref: object, client: object) -> object:
+                raise AssetDownloadError("asset download failed")
+
+        class _Plugin:
+            name = "cli-test-plugin"
+            source = object()
+
+            def __init__(self, *, client: object) -> None:
+                self.expanders = (_Expander(),)
+                self.sink = _Sink()
+
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "ladon",
+                    "run",
+                    "--plugin",
+                    "pkg:Cls",
+                    "--ref",
+                    "http://x.com",
+                ],
+            ),
+            patch("ladon.cli.load_plugin_class", return_value=_Plugin),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+
+        assert exc_info.value.code == 1
+        assert "asset download failed" in capsys.readouterr().err
+
+    def test_run_docstring_distinguishes_partial_leaf_failures(self) -> None:
+        assert _cmd_run.__doc__ is not None
+        assert "including ordinary exceptions" in _cmd_run.__doc__
+        assert "exception ``run_crawl`` does not isolate" in _cmd_run.__doc__

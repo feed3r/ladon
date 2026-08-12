@@ -65,13 +65,13 @@ class MyExpander:
         ...
 ```
 
-Exceptions that halt expansion:
+Expansion exception handling depends on where the failure occurs:
 
 | Exception | Meaning |
 |---|---|
 | `ExpansionNotReadyError` | Data not ready; abort the entire run — caller retries later |
-| `PartialExpansionError` | Some children unavailable; runner logs and continues |
-| `ChildListUnavailableError` | Child list fetch failed; runner logs and continues |
+| `PartialExpansionError` | Some children unavailable; abort from the first Expander, otherwise record and skip only the failing branch |
+| `ChildListUnavailableError` | Child list fetch failed; abort from the first Expander, otherwise record and skip only the failing branch |
 
 ### Sink
 
@@ -85,7 +85,13 @@ class MySink:
 ```
 
 `LeafUnavailableError` signals that the leaf is temporarily unavailable;
-the runner records the failure and moves on.
+the runner records the failure and moves on. Unexpected exceptions from a
+Sink are recorded the same way so other independent leaves still run; their
+text remains visible in `RunResult.errors`. Cancellation and explicitly fatal
+`AssetDownloadError` propagate instead of being counted as leaf failures.
+Expansion exceptions also retain their typed contract when raised by a Sink:
+`ExpansionNotReadyError`, `PartialExpansionError`, and
+`ChildListUnavailableError` propagate unchanged.
 
 ### CrawlPlugin
 

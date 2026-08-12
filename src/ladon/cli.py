@@ -115,8 +115,11 @@ def _cmd_run(args: argparse.Namespace) -> None:
     Exit codes
     ----------
     0 — all leaves fetched successfully
-    1 — unrecoverable error (bad plugin specifier, import failure, run exception)
-    2 — run completed with partial failures (``leaves_failed > 0`` or errors)
+    1 — unrecoverable error (bad plugin specifier, import failure, or an
+        exception ``run_crawl`` does not isolate, such as
+        ``AssetDownloadError`` or a failure outside Phase 3 leaf processing)
+    2 — run completed with partial failures (``leaves_failed > 0`` or errors,
+        including ordinary exceptions raised by ``Sink.consume()``)
     3 — ``ExpansionNotReadyError``: data not yet available; caller should retry later
     """
     from ladon.networking.client import HttpClient

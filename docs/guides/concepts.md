@@ -40,7 +40,7 @@ Its counters describe separate parts of the pipeline:
 |---|---|
 | `leaves_consumed` | Leaves whose `Sink.consume()` completed successfully, even if `on_leaf` later failed. |
 | `leaves_persisted` | Leaves for which both `Sink.consume()` and `on_leaf` completed. Without an `on_leaf` callback, this equals `leaves_consumed`. |
-| `leaves_failed` | Leaves whose `Sink.consume()` raised `LeafUnavailableError`. Callback failures are not included; find their count with `leaves_consumed - leaves_persisted`. |
+| `leaves_failed` | Leaves whose `Sink.consume()` raised a non-fatal exception, whether a classified `LeafUnavailableError` or an unexpected exception. Callback failures are not included; find their count with `leaves_consumed - leaves_persisted`. |
 
 After `RunConfig.leaf_limit` is applied, the runner always maintains:
 
@@ -63,16 +63,22 @@ parsing logs.
 
 ## Plugin errors: typed recovery signals
 
-The runner catches only the plugin exceptions whose recovery meaning it knows.
-That is intentional: a broad `except Exception` would turn programming bugs
-and unexpected failures into a misleading partial result.
+Expansion exceptions retain typed recovery meanings because a failed branch
+can affect the shape or completeness of the whole crawl. Phase 3 has a
+different boundary: a crawl may process thousands of independent leaves, so
+one leaf's unexpected exception should not discard records already fetched or
+prevent the remaining leaves from being attempted. The runner therefore
+records ordinary `Exception` values raised by `Sink.consume()` in
+`RunResult.errors`, increments `leaves_failed`, and continues. The exception's
+text is preserved in the `ref[N] consume failed: ...` diagnostic rather than
+being silently dropped.
 
 | Exception | Raise it when | Runner behaviour |
 |---|---|---|
 | `ExpansionNotReadyError` | The resource is not ready to expand, such as content that is not live. | Re-raises from any Expander and aborts the run. Retry on a later schedule, not within the same run. |
 | `PartialExpansionError` | A valid response says the child list is incomplete. | From the first Expander, re-raises. From a later Expander, records the branch error and continues with siblings. |
 | `ChildListUnavailableError` | The child list cannot be retrieved or parsed into a usable list. | From the first Expander, re-raises. From a later Expander, records the branch error and continues with siblings. |
-| `LeafUnavailableError` | One leaf cannot be fetched or parsed. | Records a leaf error, increments `leaves_failed`, and continues with the next leaf. |
+| `LeafUnavailableError` | One leaf cannot be fetched or parsed. | Records a leaf error, increments `leaves_failed`, and continues with the next leaf, as for other non-fatal `Exception` values from `Sink.consume()`. |
 
 The first Expander produces the crawl root, so it has no sibling branch for
 the runner to isolate. At deeper levels, isolating a failed branch preserves
@@ -81,9 +87,13 @@ the rest of the tree. `PartialExpansionError` and
 was valid but incomplete, while the latter says there is no usable child list.
 
 `AssetDownloadError` is deliberately outside this recovery taxonomy. The
-runner does not catch it: it propagates and aborts the run. If an asset failure
-should be non-fatal for a plugin, catch it inside that plugin before returning
-from its Expander or Sink.
+runner does not recover from it: it propagates and aborts the run. If an asset
+failure should be non-fatal for a plugin, catch it inside that plugin before
+returning from its Expander or Sink.
+
+Cancellation and other non-`Exception` `BaseException` subclasses also
+propagate unchanged. In particular, an async leaf cancellation is never
+reported as a completed crawl with that leaf counted as failed.
 
 For the scheduling-boundary pattern, see [Resume a not-ready or partial crawl](cookbook.md#resume-a-not-ready-or-partial-crawl).
 

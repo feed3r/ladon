@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from ladon.plugins.errors import (
+    AssetDownloadError,
     ChildListUnavailableError,
     ExpansionNotReadyError,
     LeafUnavailableError,
@@ -28,6 +29,8 @@ from ladon.runner import (
     RunResult,
     execute_plan_sync,
     plan_crawl_sync,
+    run_crawl,
+    run_plugin,
 )
 
 # ---------------------------------------------------------------------------
@@ -101,6 +104,154 @@ def plugin(child_refs: list[Ref]) -> _MockPlugin:
 @pytest.fixture()
 def top_ref() -> Ref:
     return Ref(url="https://demo.example.com/top/1")
+
+
+class _UnexpectedFailureSink:
+    def consume(self, ref: object, client: object) -> _DemoLeafRecord:
+        r = ref if isinstance(ref, Ref) else Ref(url=str(ref))
+        if r.url.endswith("/2"):
+            raise RuntimeError("parser bug")
+        return _DemoLeafRecord(leaf_id=r.url.split("/")[-1], url=r.url)
+
+
+class _KeyboardInterruptSink:
+    def consume(self, ref: object, client: object) -> object:
+        raise KeyboardInterrupt("stop now")
+
+
+class _AssetDownloadFailureSink:
+    def consume(self, ref: object, client: object) -> object:
+        raise AssetDownloadError("asset unavailable")
+
+
+class _TypedExpansionFailureSink:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def consume(self, ref: object, client: object) -> object:
+        raise self._error
+
+
+# ---------------------------------------------------------------------------
+# run_crawl — Phase 3 exception semantics
+# ---------------------------------------------------------------------------
+
+
+class TestRunCrawlExceptionSemantics:
+    def test_run_result_documents_both_phase_3_error_formats(self) -> None:
+        assert RunResult.__doc__ is not None
+        assert '"ref[N] consume failed: ..."' in RunResult.__doc__
+        assert '"ref[N] callback failed: ..."' in RunResult.__doc__
+
+    def test_run_crawl_documents_fatal_exceptions(self) -> None:
+        assert run_crawl.__doc__ is not None
+        assert "Raises:" in run_crawl.__doc__
+        assert "BaseException" in run_crawl.__doc__
+
+    def test_run_plugin_documents_fatal_exceptions(self) -> None:
+        assert run_plugin.__doc__ is not None
+        assert "Raises:" in run_plugin.__doc__
+        assert "AssetDownloadError" in run_plugin.__doc__
+        assert "ExpansionNotReadyError" in run_plugin.__doc__
+        assert "PartialExpansionError" in run_plugin.__doc__
+        assert "ChildListUnavailableError" in run_plugin.__doc__
+        assert "BaseException" in run_plugin.__doc__
+
+    def test_unexpected_consume_exception_is_recorded_and_run_continues(
+        self,
+        top_ref: Ref,
+        child_refs: list[Ref],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        plugin = _MockPlugin(child_refs)
+        plugin.sink = _UnexpectedFailureSink()
+
+        with caplog.at_level(logging.ERROR, logger="ladon.runner"):
+            result = run_crawl(top_ref, plugin, None, RunConfig())  # type: ignore[arg-type]
+
+        assert result.leaves_consumed == 2
+        assert result.leaves_persisted == 2
+        assert result.leaves_failed == 1
+        assert result.errors == ("ref[1] consume failed: parser bug",)
+        assert caplog.records[0].getMessage() == (
+            "leaf consume failed — ref[1] error=parser bug"
+        )
+        assert caplog.records[0].error_type == "RuntimeError"  # type: ignore[attr-defined]
+
+    def test_asset_download_error_from_consume_propagates(
+        self,
+        top_ref: Ref,
+        child_refs: list[Ref],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        plugin = _MockPlugin(child_refs)
+        plugin.sink = _AssetDownloadFailureSink()
+
+        with (
+            caplog.at_level(logging.ERROR, logger="ladon.runner"),
+            pytest.raises(AssetDownloadError, match="asset unavailable"),
+        ):
+            run_crawl(top_ref, plugin, None, RunConfig())  # type: ignore[arg-type]
+
+        assert caplog.records[0].ref_index == 0  # type: ignore[attr-defined]
+        assert caplog.records[0].error_type == "AssetDownloadError"  # type: ignore[attr-defined]
+
+    def test_expansion_not_ready_from_consume_propagates(
+        self, top_ref: Ref, child_refs: list[Ref]
+    ) -> None:
+        plugin = _MockPlugin(child_refs)
+        plugin.sink = _TypedExpansionFailureSink(
+            ExpansionNotReadyError("not ready yet")
+        )
+
+        with pytest.raises(ExpansionNotReadyError, match="not ready yet"):
+            run_crawl(top_ref, plugin, None, RunConfig())  # type: ignore[arg-type]
+
+    def test_keyboard_interrupt_from_consume_propagates(
+        self,
+        top_ref: Ref,
+        child_refs: list[Ref],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        plugin = _MockPlugin(child_refs)
+        plugin.sink = _KeyboardInterruptSink()
+
+        with (
+            caplog.at_level(logging.ERROR, logger="ladon.runner"),
+            pytest.raises(KeyboardInterrupt, match="stop now"),
+        ):
+            run_crawl(top_ref, plugin, None, RunConfig())  # type: ignore[arg-type]
+
+        assert "failed" not in caplog.records[0].getMessage()
+        assert caplog.records[0].ref_index == 0  # type: ignore[attr-defined]
+        assert caplog.records[0].error_type == "KeyboardInterrupt"  # type: ignore[attr-defined]
+
+    def test_keyboard_interrupt_from_callback_is_logged_and_propagates(
+        self,
+        top_ref: Ref,
+        child_refs: list[Ref],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        plugin = _MockPlugin(child_refs)
+
+        def cancelled_callback(record: object, parent: object) -> None:
+            raise KeyboardInterrupt("cancel persistence")
+
+        with (
+            caplog.at_level(logging.ERROR, logger="ladon.runner"),
+            pytest.raises(KeyboardInterrupt, match="cancel persistence"),
+        ):
+            run_crawl(
+                top_ref,
+                plugin,
+                None,  # type: ignore[arg-type]
+                RunConfig(),
+                on_leaf=cancelled_callback,
+            )
+
+        assert caplog.records[0].ref_index == 0  # type: ignore[attr-defined]
+        assert caplog.records[0].error_type == "KeyboardInterrupt"  # type: ignore[attr-defined]
+        assert "failed" not in caplog.records[0].getMessage()
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +552,130 @@ class TestExecutePlanSync:
         assert len(result.errors) == 1
         assert "consume failed" in result.errors[0]
 
+    def test_unexpected_consume_exception_is_recorded_and_run_continues(
+        self,
+        top_ref: Ref,
+        child_refs: list[Ref],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        plugin = _MockPlugin(child_refs)
+        plugin.sink = _UnexpectedFailureSink()
+        plan = plan_crawl_sync(top_ref, plugin, None)  # type: ignore[arg-type]
+        progress_calls: list[tuple[int, int]] = []
+
+        with caplog.at_level(logging.ERROR, logger="ladon.runner"):
+            result = execute_plan_sync(
+                plan,
+                plugin,
+                None,  # type: ignore[arg-type]
+                RunConfig(),
+                on_progress=lambda done, total: progress_calls.append(
+                    (done, total)
+                ),
+            )
+
+        assert result.leaves_consumed == 2
+        assert result.leaves_persisted == 2
+        assert result.leaves_failed == 1
+        assert result.errors == ("ref[1] consume failed: parser bug",)
+        assert progress_calls == [(1, 3), (2, 3), (3, 3)]
+        assert caplog.records[0].getMessage() == (
+            "leaf consume failed — ref[1] error=parser bug"
+        )
+        assert caplog.records[0].error_type == "RuntimeError"  # type: ignore[attr-defined]
+
+    def test_asset_download_error_from_consume_propagates(
+        self, child_refs: list[Ref], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        plugin = _MockPlugin(child_refs)
+        plugin.sink = _AssetDownloadFailureSink()
+        plan = CrawlPlan(
+            record=_DemoRecord(), leaves=tuple(child_refs), errors=()
+        )
+        progress_calls: list[tuple[int, int]] = []
+
+        with (
+            caplog.at_level(logging.ERROR, logger="ladon.runner"),
+            pytest.raises(AssetDownloadError, match="asset unavailable"),
+        ):
+            execute_plan_sync(
+                plan,
+                plugin,
+                None,  # type: ignore[arg-type]
+                RunConfig(leaf_limit=1),
+                on_progress=lambda done, total: progress_calls.append(
+                    (done, total)
+                ),
+            )
+
+        assert progress_calls == [(1, 1)]
+        assert caplog.records[0].ref_index == 0  # type: ignore[attr-defined]
+        assert caplog.records[0].error_type == "AssetDownloadError"  # type: ignore[attr-defined]
+
+    def test_partial_expansion_error_from_consume_propagates(
+        self, child_refs: list[Ref]
+    ) -> None:
+        plugin = _MockPlugin(child_refs)
+        plugin.sink = _TypedExpansionFailureSink(
+            PartialExpansionError("partial expansion")
+        )
+        plan = CrawlPlan(
+            record=_DemoRecord(), leaves=tuple(child_refs), errors=()
+        )
+        progress_calls: list[tuple[int, int]] = []
+
+        with pytest.raises(PartialExpansionError, match="partial expansion"):
+            execute_plan_sync(
+                plan,
+                plugin,
+                None,  # type: ignore[arg-type]
+                RunConfig(leaf_limit=1),
+                on_progress=lambda done, total: progress_calls.append(
+                    (done, total)
+                ),
+            )
+
+        assert progress_calls == [(1, 1)]
+
+    def test_execute_plan_sync_documents_asset_download_error(self) -> None:
+        assert execute_plan_sync.__doc__ is not None
+        assert "Raises:" in execute_plan_sync.__doc__
+        assert "AssetDownloadError" in execute_plan_sync.__doc__
+
+    def test_execute_plan_sync_documents_fatal_exceptions(self) -> None:
+        assert execute_plan_sync.__doc__ is not None
+        assert "Raises:" in execute_plan_sync.__doc__
+        assert "BaseException" in execute_plan_sync.__doc__
+
+    def test_keyboard_interrupt_from_consume_propagates(
+        self, child_refs: list[Ref], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        plugin = _MockPlugin(child_refs)
+        plugin.sink = _KeyboardInterruptSink()
+        plan = CrawlPlan(
+            record=_DemoRecord(), leaves=tuple(child_refs), errors=()
+        )
+        progress_calls: list[tuple[int, int]] = []
+
+        with (
+            caplog.at_level(logging.ERROR, logger="ladon.runner"),
+            pytest.raises(KeyboardInterrupt, match="stop now"),
+        ):
+            execute_plan_sync(
+                plan,
+                plugin,
+                None,  # type: ignore[arg-type]
+                RunConfig(),
+                on_progress=lambda done, total: progress_calls.append(
+                    (done, total)
+                ),
+            )
+
+        assert progress_calls == [(1, 3)]
+        assert "failed" not in caplog.records[0].getMessage()
+        assert caplog.records[0].ref_index == 0  # type: ignore[attr-defined]
+        assert caplog.records[0].error_type == "KeyboardInterrupt"  # type: ignore[attr-defined]
+
     def test_on_leaf_callback_failure_counted(
         self, top_ref: Ref, plugin: _MockPlugin
     ) -> None:
@@ -530,6 +805,39 @@ class TestExecutePlanSync:
         )
         assert progress_calls == [(1, 1)]
 
+    def test_on_progress_called_before_fatal_on_leaf_propagates(
+        self, top_ref: Ref, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        refs = [Ref(url="https://x.example.com/leaf/1")]
+        plugin = _MockPlugin(refs)
+        plan = plan_crawl_sync(top_ref, plugin, None)  # type: ignore[arg-type]
+        progress_calls: list[tuple[int, int]] = []
+
+        def cancelled_callback(record: object, ref: object) -> None:
+            raise KeyboardInterrupt("cancel persistence")
+
+        with (
+            caplog.at_level(logging.ERROR, logger="ladon.runner"),
+            pytest.raises(KeyboardInterrupt, match="cancel persistence"),
+        ):
+            execute_plan_sync(
+                plan,
+                plugin,
+                None,  # type: ignore[arg-type]
+                RunConfig(),
+                on_leaf=cancelled_callback,
+                on_progress=lambda done, total: progress_calls.append(
+                    (done, total)
+                ),
+            )
+
+        assert progress_calls == [(1, 1)]
+        assert caplog.records[0].ref_index == 0  # type: ignore[attr-defined]
+        assert caplog.records[0].error_type == "KeyboardInterrupt"  # type: ignore[attr-defined]
+        assert "failed" not in caplog.records[0].getMessage()
+        assert execute_plan_sync.__doc__ is not None
+        assert "Sink or ``on_leaf``" in execute_plan_sync.__doc__
+
     def test_on_progress_exception_is_swallowed(
         self, top_ref: Ref, plugin: _MockPlugin
     ) -> None:
@@ -542,6 +850,39 @@ class TestExecutePlanSync:
             plan, plugin, None, RunConfig(), on_progress=exploding_progress  # type: ignore[arg-type]
         )
         assert result.leaves_consumed == 3
+
+    def test_on_progress_base_exception_preempts_fatal_consume_error(
+        self,
+    ) -> None:
+        asset_error = AssetDownloadError("asset failed")
+
+        class _FailingSink:
+            def consume(self, ref: object, client: object) -> object:
+                raise asset_error
+
+        interruption = KeyboardInterrupt("progress bar died")
+
+        def interrupting_progress(done: int, total: int) -> None:
+            raise interruption
+
+        leaf_ref = Ref(url="https://x.example.com/leaf/1")
+        plugin = _MockPlugin([leaf_ref])
+        plugin.sink = _FailingSink()
+        plan = CrawlPlan(record=_DemoRecord(), leaves=(leaf_ref,), errors=())
+
+        with pytest.raises(
+            KeyboardInterrupt, match="progress bar died"
+        ) as exc_info:
+            execute_plan_sync(
+                plan,
+                plugin,
+                None,  # type: ignore[arg-type]
+                RunConfig(),
+                on_progress=interrupting_progress,
+            )
+
+        assert exc_info.value is interruption
+        assert exc_info.value.__context__ is asset_error
 
 
 # ---------------------------------------------------------------------------

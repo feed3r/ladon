@@ -17,7 +17,11 @@ from ladon.plugins.async_protocol import (
     AsyncSink,
     AsyncSource,
 )
-from ladon.plugins.errors import ExpansionNotReadyError, LeafUnavailableError
+from ladon.plugins.errors import (
+    AssetDownloadError,
+    ExpansionNotReadyError,
+    LeafUnavailableError,
+)
 from ladon.plugins.models import Expansion, Ref
 from ladon.runner import PluginRunResult, RunConfig
 
@@ -214,6 +218,33 @@ async def test_globally_fatal_root_errors_propagate() -> None:
             cast(AsyncHttpClient, None),
             RunConfig(),
         )
+
+
+async def test_asset_download_error_from_root_sink_propagates() -> None:
+    class _FatalSink:
+        async def consume(
+            self, ref: object, client: AsyncHttpClient
+        ) -> _Record:
+            raise AssetDownloadError("asset host unavailable")
+
+    plugin = _AsyncPlugin(_refs())
+    plugin.sink = _FatalSink()
+
+    with pytest.raises(AssetDownloadError, match="asset host unavailable"):
+        await async_run_plugin(
+            cast(AsyncCrawlPlugin, plugin),
+            cast(AsyncHttpClient, None),
+            RunConfig(),
+        )
+
+
+def test_async_run_plugin_documents_fatal_root_errors() -> None:
+    assert async_run_plugin.__doc__ is not None
+    assert "Raises:" in async_run_plugin.__doc__
+    assert "AssetDownloadError" in async_run_plugin.__doc__
+    assert "ExpansionNotReadyError" in async_run_plugin.__doc__
+    assert "PartialExpansionError" in async_run_plugin.__doc__
+    assert "ChildListUnavailableError" in async_run_plugin.__doc__
 
 
 async def test_later_fatal_root_preserves_earlier_callback_side_effects() -> (

@@ -272,11 +272,29 @@ where exceptions carry semantic meaning that drives control flow:
 
 | Exception | Raised by | Runner behaviour |
 |---|---|---|
-| `ExpansionNotReadyError` | Any Expander | Re-raise — run is globally premature; caller retries on next schedule |
-| `PartialExpansionError` | Expander | First expander: re-raise. Non-first: isolate branch, record in `errors` |
-| `ChildListUnavailableError` | Expander | First expander: re-raise. Non-first: isolate branch, record in `errors` |
+| `ExpansionNotReadyError` | Any Expander or Sink | Re-raise — run is globally premature; caller retries on next schedule |
+| `PartialExpansionError` | Expander or Sink | First expander: re-raise. Non-first: isolate branch, record in `errors`. Always fatal from the Sink (no branch to isolate). |
+| `ChildListUnavailableError` | Expander or Sink | First expander: re-raise. Non-first: isolate branch, record in `errors`. Always fatal from the Sink (no branch to isolate). |
 | `LeafUnavailableError` | Sink | Skip leaf; increment `leaves_failed`; run continues |
 | `AssetDownloadError` | Sink or Expander | Fatal — propagates to caller; run aborts. Plugins needing non-fatal asset handling must catch it internally before returning. |
+
+### Phase-3 leaf-exception isolation amendment (2026-08-11, Issue #164)
+
+An unclassified `Exception` raised by `Sink.consume()` now receives the same
+non-fatal treatment as `LeafUnavailableError`: it is recorded in `errors`,
+counted in `leaves_failed`, and the run continues. A crawl over many independent
+leaves should not lose already-fetched results because one leaf exposes a
+parsing bug, and preserving the exception text in `RunResult.errors` keeps the
+failure visible instead of silently masking it. The Decision Driver against
+catch-all exception handling is therefore addressed through visibility rather
+than aborting during Phase 3. That driver continues to apply unchanged to
+orchestrator-level Phase 1 and Phase 2 expansion handling; this amendment
+narrows its scope rather than retracting it.
+
+`ExpansionNotReadyError`, `PartialExpansionError`, and
+`ChildListUnavailableError` retain their documented behaviour whether raised
+by an Expander or the Sink. Phase 3 has no branch into which a Sink call can be
+isolated, so each exception propagates unchanged when raised there.
 
 The first-expander vs non-first-expander distinction reflects the **Bulkhead
 pattern**: a failure in one branch of the tree does not abort sibling

@@ -23,6 +23,7 @@ import pytest
 
 from ladon.async_runner import async_run_crawl, execute_plan, plan_crawl
 from ladon.plugins.errors import (
+    AssetDownloadError,
     ChildListUnavailableError,
     ExpansionNotReadyError,
     LeafUnavailableError,
@@ -74,6 +75,14 @@ class _MockAsyncSink:
         return _make_leaf(leaf_id=r.url.split("/")[-1], url=r.url)
 
 
+class _TypedAsyncExpansionFailureSink:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def consume(self, ref: object, client: object) -> object:
+        raise self._error
+
+
 class _MockAsyncPlugin:
     def __init__(self, child_refs: list[Ref]) -> None:
         self.expanders: list[Any] = [_MockAsyncExpander(child_refs)]
@@ -115,6 +124,46 @@ def config() -> RunConfig:
 @pytest.fixture()
 def top_ref() -> Ref:
     return Ref(url="https://demo.example.com/top/1")
+
+
+@pytest.mark.parametrize("entry_point", ["async_run_crawl", "execute_plan"])
+@pytest.mark.parametrize("interrupt_index", [0, 1])
+async def test_non_exception_base_exception_outranks_fatal_exception(
+    entry_point: str,
+    interrupt_index: int,
+    top_ref: Ref,
+) -> None:
+    refs = [
+        Ref(url="https://demo.example.com/leaf/asset"),
+        Ref(url="https://demo.example.com/leaf/interrupt"),
+    ]
+    if interrupt_index == 0:
+        refs.reverse()
+
+    interruption = KeyboardInterrupt("stop now")
+
+    class _ConcurrentFatalSink:
+        async def consume(self, ref: object, client: object) -> object:
+            assert isinstance(ref, Ref)
+            if ref.url.endswith("/asset"):
+                raise AssetDownloadError("asset failed")
+            await asyncio.sleep(0.01)
+            raise interruption
+
+    plugin = _MockAsyncPlugin(refs)
+    plugin.sink = _ConcurrentFatalSink()
+    config = RunConfig(async_concurrency=2)
+
+    with pytest.raises(KeyboardInterrupt, match="stop now") as exc_info:
+        if entry_point == "async_run_crawl":
+            await async_run_crawl(top_ref, plugin, None, config)  # type: ignore[arg-type]
+        else:
+            plan = CrawlPlan(
+                record=_make_record(), leaves=tuple(refs), errors=()
+            )
+            await execute_plan(plan, plugin, None, config)  # type: ignore[arg-type]
+
+    assert exc_info.value is interruption
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +299,11 @@ class TestAsyncRunnerHappyPath:
 
 
 class TestAsyncRunnerErrors:
+    def test_async_run_crawl_documents_fatal_exceptions(self) -> None:
+        assert async_run_crawl.__doc__ is not None
+        assert "Raises:" in async_run_crawl.__doc__
+        assert "BaseException" in async_run_crawl.__doc__
+
     async def test_empty_expanders_raises_value_error(
         self,
         top_ref: Ref,
@@ -333,6 +387,219 @@ class TestAsyncRunnerErrors:
         assert result.leaves_failed == 1
         assert len(result.errors) == 1
         assert "consume failed" in result.errors[0]
+
+    async def test_unexpected_consume_exception_is_recorded_and_run_continues(
+        self,
+        top_ref: Ref,
+        child_refs: list[Ref],
+        config: RunConfig,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        class _UnexpectedFailureSink:
+            async def consume(self, ref: object, client: object) -> object:
+                assert isinstance(ref, Ref)
+                if ref.url.endswith("/2"):
+                    raise RuntimeError("parser bug")
+                return _make_leaf(leaf_id=ref.url.split("/")[-1], url=ref.url)
+
+        plugin = _MockAsyncPlugin(child_refs)
+        plugin.sink = _UnexpectedFailureSink()
+
+        with caplog.at_level(logging.ERROR, logger="ladon.async_runner"):
+            result = await async_run_crawl(top_ref, plugin, None, config)  # type: ignore[arg-type]
+
+        assert result.leaves_consumed == 2
+        assert result.leaves_persisted == 2
+        assert result.leaves_failed == 1
+        assert result.errors == ("ref[1] consume failed: parser bug",)
+        assert caplog.records[0].getMessage() == (
+            "leaf consume failed — ref[1] error=parser bug"
+        )
+        assert caplog.records[0].error_type == "RuntimeError"  # type: ignore[attr-defined]
+
+    async def test_asset_download_error_from_consume_propagates(
+        self,
+        top_ref: Ref,
+        child_refs: list[Ref],
+        config: RunConfig,
+    ) -> None:
+        class _AssetFailureSink:
+            async def consume(self, ref: object, client: object) -> object:
+                raise AssetDownloadError("asset unavailable")
+
+        plugin = _MockAsyncPlugin(child_refs)
+        plugin.sink = _AssetFailureSink()
+
+        with pytest.raises(AssetDownloadError, match="asset unavailable"):
+            await async_run_crawl(top_ref, plugin, None, config)  # type: ignore[arg-type]
+
+    async def test_expansion_not_ready_from_consume_propagates(
+        self,
+        top_ref: Ref,
+        child_refs: list[Ref],
+        config: RunConfig,
+    ) -> None:
+        plugin = _MockAsyncPlugin(child_refs)
+        plugin.sink = _TypedAsyncExpansionFailureSink(
+            ExpansionNotReadyError("not ready yet")
+        )
+
+        with pytest.raises(ExpansionNotReadyError, match="not ready yet"):
+            await async_run_crawl(top_ref, plugin, None, config)  # type: ignore[arg-type]
+
+    async def test_all_fatal_batch_outcomes_are_logged_before_first_propagates(
+        self,
+        top_ref: Ref,
+        child_refs: list[Ref],
+        config: RunConfig,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        class _AssetFailureSink:
+            async def consume(self, ref: object, client: object) -> object:
+                assert isinstance(ref, Ref)
+                raise AssetDownloadError(f"asset unavailable: {ref.url}")
+
+        plugin = _MockAsyncPlugin(child_refs)
+        plugin.sink = _AssetFailureSink()
+
+        with (
+            caplog.at_level(logging.ERROR, logger="ladon.async_runner"),
+            pytest.raises(
+                AssetDownloadError, match="asset unavailable: .*/leaf/1"
+            ),
+        ):
+            await async_run_crawl(top_ref, plugin, None, config)  # type: ignore[arg-type]
+
+        fatal_logs = [
+            record
+            for record in caplog.records
+            if getattr(record, "error_type", None) == "AssetDownloadError"
+        ]
+        assert [record.ref_index for record in fatal_logs] == [0, 1, 2]  # type: ignore[attr-defined]
+        assert [record.error for record in fatal_logs] == [  # type: ignore[attr-defined]
+            f"asset unavailable: {ref.url}" for ref in child_refs
+        ]
+
+    async def test_cancelled_consume_propagates(
+        self,
+        top_ref: Ref,
+        child_refs: list[Ref],
+        config: RunConfig,
+    ) -> None:
+        cancellation = asyncio.CancelledError("cancel leaf 2")
+
+        class _CancelledSink:
+            async def consume(self, ref: object, client: object) -> object:
+                assert isinstance(ref, Ref)
+                if ref.url.endswith("/2"):
+                    raise cancellation
+                return _make_leaf(leaf_id=ref.url.split("/")[-1], url=ref.url)
+
+        plugin = _MockAsyncPlugin(child_refs)
+        plugin.sink = _CancelledSink()
+
+        with pytest.raises(
+            asyncio.CancelledError, match="cancel leaf 2"
+        ) as exc_info:
+            await async_run_crawl(top_ref, plugin, None, config)  # type: ignore[arg-type]
+
+        assert exc_info.value is cancellation
+
+    async def test_cancelled_callback_propagates_original_exception(
+        self,
+        top_ref: Ref,
+        child_refs: list[Ref],
+        config: RunConfig,
+    ) -> None:
+        plugin = _MockAsyncPlugin(child_refs)
+        cancellation = asyncio.CancelledError("cancel persistence")
+
+        async def cancelled_callback(record: object, parent: object) -> None:
+            raise cancellation
+
+        with pytest.raises(
+            asyncio.CancelledError, match="cancel persistence"
+        ) as exc_info:
+            await async_run_crawl(
+                top_ref,
+                plugin,
+                None,  # type: ignore[arg-type]
+                config,
+                on_leaf=cancelled_callback,
+            )
+
+        assert exc_info.value is cancellation
+        assert async_run_crawl.__doc__ is not None
+        assert "consume or ``on_leaf``" in async_run_crawl.__doc__
+
+    async def test_keyboard_interrupt_from_consume_propagates_original(
+        self,
+        top_ref: Ref,
+        config: RunConfig,
+    ) -> None:
+        interruption = KeyboardInterrupt("interrupt async consume")
+
+        class _InterruptingSink:
+            async def consume(self, ref: object, client: object) -> object:
+                raise interruption
+
+        plugin = _MockAsyncPlugin(
+            [Ref(url="https://demo.example.com/leaf/interrupt")]
+        )
+        plugin.sink = _InterruptingSink()
+
+        with pytest.raises(
+            KeyboardInterrupt, match="interrupt async consume"
+        ) as exc_info:
+            await async_run_crawl(top_ref, plugin, None, config)  # type: ignore[arg-type]
+
+        assert exc_info.value is interruption
+
+    async def test_keyboard_interrupt_from_callback_propagates_original(
+        self,
+        top_ref: Ref,
+        config: RunConfig,
+    ) -> None:
+        interruption = KeyboardInterrupt("interrupt async callback")
+
+        async def interrupting_callback(record: object, parent: object) -> None:
+            raise interruption
+
+        plugin = _MockAsyncPlugin(
+            [Ref(url="https://demo.example.com/leaf/interrupt")]
+        )
+
+        with pytest.raises(
+            KeyboardInterrupt, match="interrupt async callback"
+        ) as exc_info:
+            await async_run_crawl(
+                top_ref,
+                plugin,
+                None,  # type: ignore[arg-type]
+                config,
+                on_leaf=interrupting_callback,
+            )
+
+        assert exc_info.value is interruption
+
+    async def test_non_exception_base_exception_from_consume_propagates(
+        self,
+        top_ref: Ref,
+        child_refs: list[Ref],
+        config: RunConfig,
+    ) -> None:
+        class _LeafAbort(BaseException):
+            pass
+
+        class _AbortingSink:
+            async def consume(self, ref: object, client: object) -> object:
+                raise _LeafAbort("abort leaf task")
+
+        plugin = _MockAsyncPlugin(child_refs)
+        plugin.sink = _AbortingSink()
+
+        with pytest.raises(_LeafAbort, match="abort leaf task"):
+            await async_run_crawl(top_ref, plugin, None, config)  # type: ignore[arg-type]
 
     async def test_all_leaves_fail_returns_result_not_exception(
         self,
@@ -894,6 +1161,269 @@ class TestExecutePlan:
         assert result.leaves_failed == 1
         assert result.leaves_consumed + result.leaves_failed == 3
 
+    async def test_unexpected_consume_exception_is_recorded_and_run_continues(
+        self,
+        top_ref: Ref,
+        child_refs: list[Ref],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        class _UnexpectedFailureSink:
+            async def consume(self, ref: object, client: object) -> object:
+                assert isinstance(ref, Ref)
+                if ref.url.endswith("/2"):
+                    raise RuntimeError("parser bug")
+                return _make_leaf(leaf_id=ref.url.split("/")[-1], url=ref.url)
+
+        plugin = _MockAsyncPlugin(child_refs)
+        plugin.sink = _UnexpectedFailureSink()
+        plan = await plan_crawl(top_ref, plugin, None)  # type: ignore[arg-type]
+        progress_calls: list[tuple[int, int]] = []
+
+        with caplog.at_level(logging.ERROR, logger="ladon.async_runner"):
+            result = await execute_plan(
+                plan,
+                plugin,
+                None,  # type: ignore[arg-type]
+                RunConfig(),
+                on_progress=lambda done, total: progress_calls.append(
+                    (done, total)
+                ),
+            )
+
+        assert result.leaves_consumed == 2
+        assert result.leaves_persisted == 2
+        assert result.leaves_failed == 1
+        assert result.errors == ("ref[1] consume failed: parser bug",)
+        assert sorted(progress_calls) == [(1, 3), (2, 3), (3, 3)]
+        assert caplog.records[0].getMessage() == (
+            "leaf consume failed — ref[1] error=parser bug"
+        )
+        assert caplog.records[0].error_type == "RuntimeError"  # type: ignore[attr-defined]
+
+    async def test_asset_download_error_from_consume_propagates(
+        self, top_ref: Ref, child_refs: list[Ref]
+    ) -> None:
+        class _AssetFailureSink:
+            async def consume(self, ref: object, client: object) -> object:
+                raise AssetDownloadError("asset unavailable")
+
+        plugin = _MockAsyncPlugin(child_refs)
+        plugin.sink = _AssetFailureSink()
+        plan = await plan_crawl(top_ref, plugin, None)  # type: ignore[arg-type]
+        progress_calls: list[tuple[int, int]] = []
+
+        with pytest.raises(AssetDownloadError, match="asset unavailable"):
+            await execute_plan(
+                plan,
+                plugin,
+                None,  # type: ignore[arg-type]
+                RunConfig(leaf_limit=1),
+                on_progress=lambda done, total: progress_calls.append(
+                    (done, total)
+                ),
+            )
+
+        assert progress_calls == [(1, 1)]
+
+    async def test_child_list_unavailable_from_consume_propagates(
+        self, child_refs: list[Ref]
+    ) -> None:
+        plugin = _MockAsyncPlugin(child_refs)
+        plugin.sink = _TypedAsyncExpansionFailureSink(
+            ChildListUnavailableError("child list unavailable")
+        )
+        plan = CrawlPlan(
+            record=_make_record(), leaves=tuple(child_refs), errors=()
+        )
+        progress_calls: list[tuple[int, int]] = []
+
+        with pytest.raises(
+            ChildListUnavailableError, match="child list unavailable"
+        ):
+            await execute_plan(
+                plan,
+                plugin,
+                None,  # type: ignore[arg-type]
+                RunConfig(leaf_limit=1),
+                on_progress=lambda done, total: progress_calls.append(
+                    (done, total)
+                ),
+            )
+
+        assert progress_calls == [(1, 1)]
+
+    async def test_execute_plan_logs_every_fatal_batch_outcome(
+        self,
+        child_refs: list[Ref],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        class _AssetFailureSink:
+            async def consume(self, ref: object, client: object) -> object:
+                assert isinstance(ref, Ref)
+                raise AssetDownloadError(f"asset unavailable: {ref.url}")
+
+        plugin = _MockAsyncPlugin(child_refs)
+        plugin.sink = _AssetFailureSink()
+        plan = CrawlPlan(
+            record=_make_record(), leaves=tuple(child_refs), errors=()
+        )
+
+        with (
+            caplog.at_level(logging.ERROR, logger="ladon.async_runner"),
+            pytest.raises(
+                AssetDownloadError, match="asset unavailable: .*/leaf/1"
+            ),
+        ):
+            await execute_plan(plan, plugin, None, RunConfig())  # type: ignore[arg-type]
+
+        fatal_logs = [
+            record
+            for record in caplog.records
+            if getattr(record, "error_type", None) == "AssetDownloadError"
+        ]
+        assert [record.ref_index for record in fatal_logs] == [0, 1, 2]  # type: ignore[attr-defined]
+
+    def test_execute_plan_documents_fatal_exceptions(self) -> None:
+        assert execute_plan.__doc__ is not None
+        assert "Raises:" in execute_plan.__doc__
+        assert "AssetDownloadError" in execute_plan.__doc__
+        assert "asyncio.CancelledError" in execute_plan.__doc__
+        assert "BaseException" in execute_plan.__doc__
+
+    async def test_cancelled_consume_propagates(
+        self,
+        top_ref: Ref,
+        child_refs: list[Ref],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        cancellation = asyncio.CancelledError("cancel leaf 2")
+
+        class _CancelledSink:
+            async def consume(self, ref: object, client: object) -> object:
+                assert isinstance(ref, Ref)
+                if ref.url.endswith("/2"):
+                    raise cancellation
+                return _make_leaf(leaf_id=ref.url.split("/")[-1], url=ref.url)
+
+        plugin = _MockAsyncPlugin(child_refs)
+        plugin.sink = _CancelledSink()
+        plan = await plan_crawl(top_ref, plugin, None)  # type: ignore[arg-type]
+        progress_calls: list[tuple[int, int]] = []
+
+        with (
+            caplog.at_level(logging.ERROR, logger="ladon.async_runner"),
+            pytest.raises(
+                asyncio.CancelledError, match="cancel leaf 2"
+            ) as exc_info,
+        ):
+            await execute_plan(
+                plan,
+                plugin,
+                None,  # type: ignore[arg-type]
+                RunConfig(),
+                on_progress=lambda done, total: progress_calls.append(
+                    (done, total)
+                ),
+            )
+
+        assert exc_info.value is cancellation
+        assert progress_calls == [(1, 3), (2, 3), (3, 3)]
+        cancellation_logs = [
+            record
+            for record in caplog.records
+            if getattr(record, "error_type", None) == "CancelledError"
+        ]
+        assert len(cancellation_logs) == 1
+        assert "failed" not in cancellation_logs[0].getMessage()
+
+    async def test_non_exception_base_exception_from_consume_propagates(
+        self, top_ref: Ref, child_refs: list[Ref]
+    ) -> None:
+        class _LeafAbort(BaseException):
+            pass
+
+        class _AbortingSink:
+            async def consume(self, ref: object, client: object) -> object:
+                raise _LeafAbort("abort leaf task")
+
+        plugin = _MockAsyncPlugin(child_refs)
+        plugin.sink = _AbortingSink()
+        plan = await plan_crawl(top_ref, plugin, None)  # type: ignore[arg-type]
+
+        with pytest.raises(_LeafAbort, match="abort leaf task"):
+            await execute_plan(plan, plugin, None, RunConfig())  # type: ignore[arg-type]
+
+    async def test_keyboard_interrupt_from_consume_propagates_original(
+        self,
+    ) -> None:
+        interruption = KeyboardInterrupt("interrupt planned consume")
+
+        class _InterruptingSink:
+            async def consume(self, ref: object, client: object) -> object:
+                raise interruption
+
+        leaf_ref = Ref(url="https://demo.example.com/leaf/interrupt")
+        plugin = _MockAsyncPlugin([leaf_ref])
+        plugin.sink = _InterruptingSink()
+        plan = CrawlPlan(record=_make_record(), leaves=(leaf_ref,), errors=())
+
+        with pytest.raises(
+            KeyboardInterrupt, match="interrupt planned consume"
+        ) as exc_info:
+            await execute_plan(plan, plugin, None, RunConfig())  # type: ignore[arg-type]
+
+        assert exc_info.value is interruption
+
+    async def test_keyboard_interrupt_from_callback_propagates_original(
+        self,
+    ) -> None:
+        interruption = KeyboardInterrupt("interrupt planned callback")
+
+        async def interrupting_callback(record: object, ref: object) -> None:
+            raise interruption
+
+        leaf_ref = Ref(url="https://demo.example.com/leaf/interrupt")
+        plugin = _MockAsyncPlugin([leaf_ref])
+        plan = CrawlPlan(record=_make_record(), leaves=(leaf_ref,), errors=())
+
+        with pytest.raises(
+            KeyboardInterrupt, match="interrupt planned callback"
+        ) as exc_info:
+            await execute_plan(
+                plan,
+                plugin,
+                None,  # type: ignore[arg-type]
+                RunConfig(),
+                on_leaf=interrupting_callback,
+            )
+
+        assert exc_info.value is interruption
+
+    async def test_cancelling_executor_still_cancels_gather(self) -> None:
+        sink_started = asyncio.Event()
+
+        class _BlockingSink:
+            async def consume(self, ref: object, client: object) -> object:
+                sink_started.set()
+                await asyncio.Event().wait()
+
+        plugin = _MockAsyncPlugin([])
+        plugin.sink = _BlockingSink()
+        plan = CrawlPlan(
+            record=_make_record(),
+            leaves=(Ref(url="https://demo.example.com/leaf/1"),),
+            errors=(),
+        )
+        execution = asyncio.create_task(
+            execute_plan(plan, plugin, None, RunConfig())  # type: ignore[arg-type]
+        )
+        await sink_started.wait()
+
+        execution.cancel("cancel executor")
+
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+
     async def test_on_leaf_callback_failure_counted(
         self, top_ref: Ref, plugin: _MockAsyncPlugin
     ) -> None:
@@ -980,16 +1510,23 @@ class TestExecutePlan:
         )
         assert calls == []
 
-    async def test_warns_when_on_progress_is_async(
+    async def test_rejects_async_on_progress_before_leaf_processing(
         self, plugin: _MockAsyncPlugin
     ) -> None:
-        plan = CrawlPlan(record=_make_record(), leaves=(), errors=())
+        assert execute_plan.__doc__ is not None
+        assert "TypeError" in execute_plan.__doc__
+
+        plan = CrawlPlan(
+            record=_make_record(),
+            leaves=(Ref(url="https://demo.example.com/leaf/1"),),
+            errors=(),
+        )
 
         async def async_callback(done: int, total: int) -> None:
             pass
 
-        with pytest.warns(
-            UserWarning, match="on_progress must be a synchronous callable"
+        with pytest.raises(
+            TypeError, match="on_progress must be a synchronous callable"
         ):
             await execute_plan(
                 plan,
@@ -997,6 +1534,30 @@ class TestExecutePlan:
                 None,  # type: ignore[arg-type]
                 RunConfig(),
                 on_progress=async_callback,
+            )
+
+    async def test_rejects_async_callable_object_as_on_progress(
+        self, plugin: _MockAsyncPlugin
+    ) -> None:
+        plan = CrawlPlan(
+            record=_make_record(),
+            leaves=(Ref(url="https://demo.example.com/leaf/1"),),
+            errors=(),
+        )
+
+        class _AsyncProgress:
+            async def __call__(self, done: int, total: int) -> None:
+                pass
+
+        with pytest.raises(
+            TypeError, match="on_progress must be a synchronous callable"
+        ):
+            await execute_plan(
+                plan,
+                plugin,
+                None,  # type: ignore[arg-type]
+                RunConfig(),
+                on_progress=_AsyncProgress(),
             )
 
     async def test_on_progress_called_after_sink_failure(
@@ -1041,6 +1602,37 @@ class TestExecutePlan:
         )
         assert progress_calls == [(1, 1)]
 
+    async def test_on_progress_called_before_fatal_on_leaf_propagates(
+        self, top_ref: Ref
+    ) -> None:
+        refs = [Ref(url="https://demo.example.com/leaf/1")]
+        plugin = _MockAsyncPlugin(refs)
+        plan = await plan_crawl(top_ref, plugin, None)  # type: ignore[arg-type]
+        progress_calls: list[tuple[int, int]] = []
+        cancellation = asyncio.CancelledError("cancel persistence")
+
+        async def cancelled_callback(record: object, ref: object) -> None:
+            raise cancellation
+
+        with pytest.raises(
+            asyncio.CancelledError, match="cancel persistence"
+        ) as exc_info:
+            await execute_plan(
+                plan,
+                plugin,
+                None,  # type: ignore[arg-type]
+                RunConfig(),
+                on_leaf=cancelled_callback,
+                on_progress=lambda done, total: progress_calls.append(
+                    (done, total)
+                ),
+            )
+
+        assert exc_info.value is cancellation
+        assert progress_calls == [(1, 1)]
+        assert execute_plan.__doc__ is not None
+        assert "consume or ``on_leaf``" in execute_plan.__doc__
+
     async def test_plan_crawl_then_execute_plan_roundtrip(
         self, top_ref: Ref, plugin: _MockAsyncPlugin
     ) -> None:
@@ -1049,10 +1641,10 @@ class TestExecutePlan:
         result = await execute_plan(filtered, plugin, None, RunConfig())  # type: ignore[arg-type]
         assert result.leaves_consumed == 2
 
-    async def test_on_progress_fired_for_base_exception_leaves(
+    async def test_on_progress_fired_for_unexpected_exception_leaves(
         self, top_ref: Ref
     ) -> None:
-        """BaseException escaping _process_leaf must still trigger on_progress."""
+        """Recorded consume exceptions still count as completed attempts."""
 
         class _ExplodingSink:
             async def consume(self, ref: object, client: object) -> object:
@@ -1073,10 +1665,8 @@ class TestExecutePlan:
             RunConfig(),
             on_progress=lambda d, t: progress_calls.append((d, t)),
         )
-        # The RuntimeError is not LeafUnavailableError, so it escapes
-        # _process_leaf and is caught by gather(return_exceptions=True).
-        # on_progress must still fire so callers can reach total.
         assert result.leaves_failed == 1
+        assert result.errors == ("ref[0] consume failed: unexpected kaboom",)
         assert len(progress_calls) == 1
         assert progress_calls[0] == (1, 1)
 
@@ -1092,6 +1682,64 @@ class TestExecutePlan:
             plan, plugin, None, RunConfig(), on_progress=exploding_progress  # type: ignore[arg-type]
         )
         assert result.leaves_consumed == 3
+
+    async def test_cancelled_on_progress_propagates_original(self) -> None:
+        cancellation = asyncio.CancelledError("cancel progress reporting")
+
+        def cancelled_progress(done: int, total: int) -> None:
+            raise cancellation
+
+        leaf_ref = Ref(url="https://demo.example.com/leaf/1")
+        plugin = _MockAsyncPlugin([leaf_ref])
+        plan = CrawlPlan(record=_make_record(), leaves=(leaf_ref,), errors=())
+
+        with pytest.raises(
+            asyncio.CancelledError, match="cancel progress reporting"
+        ) as exc_info:
+            await execute_plan(
+                plan,
+                plugin,
+                None,  # type: ignore[arg-type]
+                RunConfig(),
+                on_progress=cancelled_progress,
+            )
+
+        assert exc_info.value is cancellation
+
+    def test_on_progress_base_exception_preempts_fatal_consume_error(
+        self,
+    ) -> None:
+        asset_error = AssetDownloadError("asset failed")
+
+        class _FailingSink:
+            async def consume(self, ref: object, client: object) -> object:
+                raise asset_error
+
+        interruption = KeyboardInterrupt("progress bar died")
+
+        def interrupting_progress(done: int, total: int) -> None:
+            raise interruption
+
+        leaf_ref = Ref(url="https://demo.example.com/leaf/1")
+        plugin = _MockAsyncPlugin([leaf_ref])
+        plugin.sink = _FailingSink()
+        plan = CrawlPlan(record=_make_record(), leaves=(leaf_ref,), errors=())
+
+        with pytest.raises(
+            KeyboardInterrupt, match="progress bar died"
+        ) as exc_info:
+            asyncio.run(
+                execute_plan(
+                    plan,
+                    plugin,
+                    None,  # type: ignore[arg-type]
+                    RunConfig(),
+                    on_progress=interrupting_progress,
+                )
+            )
+
+        assert exc_info.value is interruption
+        assert exc_info.value.__context__ is asset_error
 
     async def test_plan_importable_from_ladon(self) -> None:
         from ladon import execute_plan as _ep

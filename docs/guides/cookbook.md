@@ -64,9 +64,11 @@ at later levels the runner skips only that branch and adds its message to
 --8<-- "examples/cookbook/resume_partial_crawl.py:example"
 ```
 
-`LeafUnavailableError` is different: the runner records it in `result.errors`,
-increments `leaves_failed`, and continues with other leaves. Make persistence
-idempotent so a scheduled retry can safely revisit successful leaves too.
+Leaf failures are different: the runner records `LeafUnavailableError` and
+other non-fatal exceptions from `Sink.consume()` in `result.errors`, increments
+`leaves_failed`, and continues with other leaves. Make persistence idempotent
+so a scheduled retry can safely revisit successful leaves too. Cancellation
+and explicitly fatal `AssetDownloadError` still propagate.
 
 ## Async leaf processing for high throughput
 
