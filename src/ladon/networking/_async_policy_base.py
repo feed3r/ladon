@@ -112,15 +112,13 @@ class AsyncPolicyBase(ABC):
         """Return the total number of attempts for one request."""
         return 1 + max(0, self._config.retries)
 
-    async def _sleep_between_attempts(self, attempt: int) -> None:
-        """Sleep between retry attempts using exponential backoff."""
+    def _backoff_delay(self, attempt: int) -> float:
+        """Compute exponential backoff before the next retry attempt."""
         backoff_base = self._config.backoff_base_seconds
         if backoff_base <= 0:
-            return
+            return 0.0
         cap = backoff_base * (2 ** max(0, attempt - 1))
-        await asyncio.sleep(
-            uniform(0.0, cap) if self._config.backoff_jitter else cap
-        )
+        return uniform(0.0, cap) if self._config.backoff_jitter else cap
 
     @staticmethod
     def _parse_retry_after(response: Any) -> float | None:
@@ -139,17 +137,11 @@ class AsyncPolicyBase(ABC):
         except Exception:
             return None
 
-    async def _sleep_for_retry_after(
-        self, retry_after: float | None, attempt: int
-    ) -> None:
-        """Sleep before a retry triggered by a rate-limiting HTTP response."""
+    def _retry_delay(self, retry_after: float | None, attempt: int) -> float:
+        """Compute the delay for a rate-limiting HTTP response retry."""
         if retry_after is not None:
-            capped = min(retry_after, self._config.max_retry_after_seconds)
-            await asyncio.sleep(
-                max(capped, self._config.min_request_interval_seconds)
-            )
-        else:
-            await self._sleep_between_attempts(attempt)
+            return min(retry_after, self._config.max_retry_after_seconds)
+        return self._backoff_delay(attempt)
 
     def _merge_params(
         self, params: Mapping[str, str] | None
@@ -161,7 +153,9 @@ class AsyncPolicyBase(ABC):
         merged = {**dp, **(params or {})}
         return merged if merged else None
 
-    async def _enforce_rate_limit(self, host: str) -> None:
+    async def _enforce_rate_limit(
+        self, host: str, extra_delay: float = 0.0
+    ) -> None:
         """Enforce per-host politeness delay before issuing a request.
 
         Concurrent callers reserve start slots while holding a host-specific
@@ -174,12 +168,14 @@ class AsyncPolicyBase(ABC):
         ``async with`` block releases the lock for the next waiter.
         """
         if not host:
+            if extra_delay > 0:
+                await asyncio.sleep(extra_delay)
             return
         interval = max(
             self._config.min_request_interval_seconds,
             self._crawl_delay_overrides.get(host, 0.0),
         )
-        if interval <= 0:
+        if interval <= 0 and extra_delay <= 0:
             return
 
         lock = self._rate_limit_locks.get(host)
@@ -187,12 +183,14 @@ class AsyncPolicyBase(ABC):
             lock = asyncio.Lock()
             self._rate_limit_locks[host] = lock
         async with lock:
+            interval_remaining = 0.0
             last = self._last_request_time.get(host)
             if last is not None:
                 elapsed = monotonic() - last
-                remaining = interval - elapsed
-                if remaining > 0:
-                    await asyncio.sleep(remaining)
+                interval_remaining = max(0.0, interval - elapsed)
+            wait = max(interval_remaining, extra_delay)
+            if wait > 0:
+                await asyncio.sleep(wait)
             self._last_request_time[host] = monotonic()
 
     def _get_circuit_breaker(self, host: str) -> CircuitBreaker | None:
@@ -366,11 +364,16 @@ class AsyncPolicyBase(ABC):
             last_error: Exception | None = None
             last_blocked_response: Any = None
             last_blocked_retry_after: float | None = None
+            retry_delay = 0.0
             current_proxy: Mapping[str, str] | None = None
             if pool is not None:
                 current_proxy = pool.next_proxy()
 
             for _ in range(self._max_attempts()):
+                if attempts > 0:
+                    await self._enforce_rate_limit(
+                        host, extra_delay=retry_delay
+                    )
                 attempts += 1
                 try:
                     response = await self._execute_attempt(
@@ -389,7 +392,7 @@ class AsyncPolicyBase(ABC):
                             if pool is not None:
                                 pool.mark_failure(current_proxy)
                                 current_proxy = pool.next_proxy()
-                            await self._sleep_for_retry_after(
+                            retry_delay = self._retry_delay(
                                 last_blocked_retry_after, attempts
                             )
                             continue
@@ -443,7 +446,7 @@ class AsyncPolicyBase(ABC):
                     if pool is not None:
                         pool.mark_failure(current_proxy)
                         current_proxy = pool.next_proxy()
-                    await self._sleep_between_attempts(attempts)
+                    retry_delay = self._backoff_delay(attempts)
                 finally:
                     if host:
                         self._last_request_time[host] = monotonic()

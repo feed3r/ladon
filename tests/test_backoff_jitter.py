@@ -4,6 +4,7 @@
 
 from unittest.mock import Mock, call, patch
 
+import pytest
 import requests
 
 from ladon.networking.client import HttpClient
@@ -64,9 +65,10 @@ class TestJitterDisabled:
     def test_zero_base_no_sleep_no_uniform(
         self, mock_get, mock_uniform, mock_sleep
     ):
-        config = HttpClientConfig(
-            timeout_seconds=5.0, retries=1, backoff_base_seconds=0.0
-        )
+        with pytest.warns(UserWarning, match="explicit opt-out"):
+            config = HttpClientConfig(
+                timeout_seconds=5.0, retries=1, backoff_base_seconds=0.0
+            )
         client = HttpClient(config)
         mock_get.side_effect = requests.exceptions.Timeout("t/o")
 
@@ -132,12 +134,13 @@ class TestJitterEnabled:
     @patch("ladon.networking._sync_policy_base.uniform")
     @patch("requests.Session.get")
     def test_jitter_zero_base_is_noop(self, mock_get, mock_uniform, mock_sleep):
-        config = HttpClientConfig(
-            timeout_seconds=5.0,
-            retries=1,
-            backoff_base_seconds=0.0,
-            backoff_jitter=True,
-        )
+        with pytest.warns(UserWarning, match="explicit opt-out"):
+            config = HttpClientConfig(
+                timeout_seconds=5.0,
+                retries=1,
+                backoff_base_seconds=0.0,
+                backoff_jitter=True,
+            )
         client = HttpClient(config)
         mock_get.side_effect = requests.exceptions.Timeout("t/o")
 

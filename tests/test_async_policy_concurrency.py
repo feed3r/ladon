@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from time import monotonic
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -232,6 +233,46 @@ async def test_same_host_concurrent_requests_reserve_spaced_slots() -> None:
         later - earlier >= interval * 0.8
         for earlier, later in zip(starts, starts[1:], strict=False)
     )
+
+
+async def test_retry_merges_crawl_delay_into_one_locked_sleep() -> None:
+    responses = iter(
+        [
+            _Response(
+                "https://retry.example/item",
+                status_code=429,
+                headers={"Retry-After": "5"},
+            ),
+            _Response("https://retry.example/item"),
+        ]
+    )
+
+    async def attempt(url: str) -> _Response:
+        return next(responses)
+
+    client = _PolicyClient(
+        HttpClientConfig(
+            retries=1,
+            min_request_interval_seconds=1.0,
+        ),
+        attempt,
+    )
+    client.set_crawl_delay("retry.example", 10.0)
+
+    with (
+        patch(
+            "ladon.networking._async_policy_base.monotonic",
+            side_effect=[90.0, 100.0, 100.0, 110.0, 110.0],
+        ),
+        patch(
+            "ladon.networking._async_policy_base.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as mock_sleep,
+    ):
+        result = await client.get("https://retry.example/item")
+
+    assert result.ok
+    mock_sleep.assert_awaited_once_with(10.0)
 
 
 async def test_different_hosts_do_not_share_a_rate_limit_lock() -> None:

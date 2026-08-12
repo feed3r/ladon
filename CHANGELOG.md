@@ -20,6 +20,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Polite retry pacing** — retries now enforce per-host rate limits, including
+  robots.txt `Crawl-delay` overrides, on every attempt and merge that wait with
+  Retry-After or backoff into one sleep. The default backoff is now a safe
+  `0.5` seconds; explicitly setting zero with retries enabled emits a warning.
 - **Consistent runner leaf-exception semantics** — sync crawls now record an
   unexpected non-fatal `Sink.consume()` exception and continue with remaining
   leaves instead of aborting and losing the partial result. Async crawls now

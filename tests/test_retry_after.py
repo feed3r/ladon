@@ -197,6 +197,22 @@ class TestRetryAfterBehavior:
 
     @patch("ladon.networking._sync_policy_base.sleep")
     @patch("requests.Session.get")
+    def test_get_429_no_retry_after_uses_safe_default_backoff(
+        self, mock_get, mock_sleep
+    ):
+        client = HttpClient(HttpClientConfig(timeout_seconds=5.0, retries=1))
+        mock_get.side_effect = [
+            _mock_response(status=429),
+            _mock_response(status=200, content=b"ok"),
+        ]
+
+        result = client.get("http://example.com")
+
+        assert result.ok
+        mock_sleep.assert_called_once_with(0.5)
+
+    @patch("ladon.networking._sync_policy_base.sleep")
+    @patch("requests.Session.get")
     def test_get_429_exhausts_retries_returns_rate_limited_error(
         self, mock_get, mock_sleep
     ):
@@ -316,9 +332,10 @@ class TestRetryAfterBehavior:
         assert result.meta["method"] == "GET"
 
     @patch("ladon.networking._sync_policy_base.sleep")
+    @patch("ladon.networking._sync_policy_base.monotonic")
     @patch("requests.Session.get")
     def test_retry_after_below_min_interval_sleeps_min_interval(
-        self, mock_get, mock_sleep
+        self, mock_get, mock_monotonic, mock_sleep
     ):
         # Retry-After (5s) < min_request_interval (60s): politeness floor wins.
         config = HttpClientConfig(
@@ -331,11 +348,37 @@ class TestRetryAfterBehavior:
             _mock_response(status=429, headers={"Retry-After": "5"}),
             _mock_response(status=200, content=b"ok"),
         ]
+        mock_monotonic.side_effect = [100.0, 100.0, 160.0]
 
         result = client.get("http://example.com")
 
         assert result.ok
         mock_sleep.assert_called_once_with(60.0)
+
+    @patch("ladon.networking._sync_policy_base.sleep")
+    @patch("ladon.networking._sync_policy_base.monotonic")
+    @patch("requests.Session.get")
+    def test_retry_merges_crawl_delay_into_one_sleep(
+        self, mock_get, mock_monotonic, mock_sleep
+    ):
+        client = HttpClient(
+            HttpClientConfig(
+                timeout_seconds=5.0,
+                retries=1,
+                min_request_interval_seconds=1.0,
+            )
+        )
+        client.set_crawl_delay("example.com", 10.0)
+        mock_get.side_effect = [
+            _mock_response(status=429, headers={"Retry-After": "5"}),
+            _mock_response(status=200, content=b"ok"),
+        ]
+        mock_monotonic.side_effect = [100.0, 100.0, 110.0]
+
+        result = client.get("http://example.com")
+
+        assert result.ok
+        mock_sleep.assert_called_once_with(10.0)
 
     @patch("ladon.networking._sync_policy_base.sleep")
     @patch("requests.Session.get")
