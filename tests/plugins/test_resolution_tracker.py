@@ -11,7 +11,9 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
+from ladon.networking.errors import TransientNetworkError
 from ladon.observability import DecisionEvent
+from ladon.plugins.errors import LeafUnavailableError
 from ladon.plugins.models import Ref
 from ladon.plugins.resolution import MultiSourceSink
 
@@ -126,7 +128,7 @@ class TestSourceFailedEvent:
                 ref: Ref,
                 client: object,  # noqa: ARG002
             ) -> bytes | None:
-                raise ValueError("network error")
+                raise TransientNetworkError("network error")
 
         tracker = _CapturingTracker()
         sink = _FailingSink(
@@ -138,7 +140,7 @@ class TestSourceFailedEvent:
         failed = tracker.by_event("source_failed")
         assert len(failed) == 1
         assert failed[0].source == "bad_source"
-        assert failed[0].metadata["exception_type"] == "ValueError"
+        assert failed[0].metadata["exception_type"] == "TransientNetworkError"
 
     def test_source_failed_continues_to_next_source(self) -> None:
         class _PartialFailSink(_SimpleSink):
@@ -149,7 +151,7 @@ class TestSourceFailedEvent:
                 client: object,  # noqa: ARG002
             ) -> bytes | None:
                 if source.name == "fail":
-                    raise RuntimeError("oops")
+                    raise TransientNetworkError("oops")
                 return source.fetch()
 
         tracker = _CapturingTracker()
@@ -164,6 +166,35 @@ class TestSourceFailedEvent:
         assert data == b"GOOD"
         assert src.name == "ok"  # type: ignore[union-attr]
         assert "source_failed" in tracker.event_names()
+
+    def test_leaf_unavailable_continues_to_next_source(self) -> None:
+        class _PartialFailSink(_SimpleSink):
+            def _fetch_from_source(
+                self,
+                source: _SimpleSource,
+                ref: Ref,
+                client: object,  # noqa: ARG002
+            ) -> bytes | None:
+                if source.name == "fail":
+                    raise LeafUnavailableError("leaf unavailable")
+                return source.fetch()
+
+        tracker = _CapturingTracker()
+        sink = _PartialFailSink(
+            sources=[
+                _SimpleSource("fail", b"irrelevant"),
+                _SimpleSource("ok", b"GOOD"),
+            ],
+            tracker=tracker,
+        )
+        data, src = sink.resolve_multi(_ref(), MagicMock())
+
+        assert data == b"GOOD"
+        assert src.name == "ok"  # type: ignore[union-attr]
+        failed = tracker.by_event("source_failed")
+        assert len(failed) == 1
+        assert failed[0].source == "fail"
+        assert failed[0].metadata["exception_type"] == "LeafUnavailableError"
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +300,32 @@ class TestPredicateRejectedEvent:
             tracker=tracker,
         )
         sink.resolve_multi(_ref(), MagicMock())
+        ev = tracker.by_event("predicate_rejected")[0]
+        assert ev.metadata["predicate_name"] == "<subclass-override>"
+
+    def test_predicate_name_honors_dynamically_dispatched_override(
+        self,
+    ) -> None:
+        """Instance dispatch of the existing override hook remains supported."""
+
+        class _DynamicOverrideSink(_SimpleSink):
+            def __getattribute__(self, name: str) -> Any:
+                if name == "_all_predicates_pass":
+
+                    def _reject(data: bytes, ref: Ref) -> bool:  # noqa: ARG001
+                        return False
+
+                    return _reject
+                return super().__getattribute__(name)
+
+        tracker = _CapturingTracker()
+        sink = _DynamicOverrideSink(
+            sources=[_SimpleSource("a", b"DATA")],
+            predicates=[_MinLengthPredicate(1)],
+            tracker=tracker,
+        )
+        sink.resolve_multi(_ref(), MagicMock())
+
         ev = tracker.by_event("predicate_rejected")[0]
         assert ev.metadata["predicate_name"] == "<subclass-override>"
 
@@ -411,6 +468,39 @@ class TestNullTrackerDefault:
 
 
 class TestRejectionInfoMetadata:
+    def test_only_rejecting_predicate_diagnostics_run_once(self) -> None:
+        class _DiagnosticPredicate:
+            def __init__(self, accepted: bool) -> None:
+                self.accepted = accepted
+                self.accepts_calls = 0
+                self.rejection_info_calls = 0
+
+            def accepts(self, data: bytes, ref: Ref) -> bool:  # noqa: ARG002
+                self.accepts_calls += 1
+                return self.accepted
+
+            def rejection_info(self) -> dict[str, Any]:
+                self.rejection_info_calls += 1
+                return {"detail": "rejected"}
+
+        passing = _DiagnosticPredicate(accepted=True)
+        rejecting = _DiagnosticPredicate(accepted=False)
+        tracker = _CapturingTracker()
+        sink = _SimpleSink(
+            sources=[_SimpleSource("a", b"DATA")],
+            predicates=[passing, rejecting],
+            tracker=tracker,
+        )
+        sink.resolve_multi(_ref(), MagicMock())
+
+        assert passing.accepts_calls == 1
+        assert passing.rejection_info_calls == 0
+        assert rejecting.accepts_calls == 1
+        assert rejecting.rejection_info_calls == 1
+        ev = tracker.by_event("predicate_rejected")[0]
+        assert ev.metadata["predicate_name"] == "_DiagnosticPredicate"
+        assert ev.metadata["detail"] == "rejected"
+
     def test_rejection_info_merged_into_predicate_rejected_metadata(
         self,
     ) -> None:
