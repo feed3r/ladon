@@ -72,7 +72,7 @@ the config is immutable after construction.
 |---|---|---|
 | `user_agent` | `None` | Custom `User-Agent` header |
 | `retries` | `0` | Number of retry attempts after the first failure |
-| `backoff_base_seconds` | `0.0` | Exponential backoff base (disabled if 0) |
+| `backoff_base_seconds` | `0.5` | Exponential backoff base (set to 0 for an explicit unpaced-retry opt-out) |
 | `timeout_seconds` | `30.0` | Request timeout in seconds |
 | `connect_timeout_seconds` | `None` | Separate connect timeout (set both or neither) |
 | `read_timeout_seconds` | `None` | Separate read timeout (set both or neither) |

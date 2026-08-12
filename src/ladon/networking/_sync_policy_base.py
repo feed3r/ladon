@@ -121,13 +121,13 @@ class SyncPolicyBase(ABC):
         """Return the total number of attempts for one request."""
         return 1 + max(0, self._config.retries)
 
-    def _sleep_between_attempts(self, attempt: int) -> None:
-        """Sleep between retry attempts using exponential backoff."""
+    def _backoff_delay(self, attempt: int) -> float:
+        """Compute exponential backoff before the next retry attempt."""
         backoff_base = self._config.backoff_base_seconds
         if backoff_base <= 0:
-            return
+            return 0.0
         cap = backoff_base * (2 ** max(0, attempt - 1))
-        sleep(uniform(0.0, cap) if self._config.backoff_jitter else cap)
+        return uniform(0.0, cap) if self._config.backoff_jitter else cap
 
     @staticmethod
     def _parse_retry_after(response: Any) -> float | None:
@@ -154,22 +154,16 @@ class SyncPolicyBase(ABC):
         except Exception:  # fail-open: treat any unparseable date as absent
             return None
 
-    def _sleep_for_retry_after(
-        self, retry_after: float | None, attempt: int
-    ) -> None:
-        """Sleep before a retry triggered by a rate-limiting HTTP response.
+    def _retry_delay(self, retry_after: float | None, attempt: int) -> float:
+        """Compute the delay for a rate-limiting HTTP response retry.
 
-        When *retry_after* is not ``None``: caps it at
-        ``max_retry_after_seconds``, then takes the longer of the capped value
-        and ``min_request_interval_seconds`` so the client's own politeness
-        policy is never violated.  Falls back to ``_sleep_between_attempts``
-        when *retry_after* is ``None``.
+        A supplied value is capped at ``max_retry_after_seconds``. An absent
+        value falls back to exponential backoff. Per-host politeness is merged
+        with this delay immediately before the next attempt.
         """
         if retry_after is not None:
-            capped = min(retry_after, self._config.max_retry_after_seconds)
-            sleep(max(capped, self._config.min_request_interval_seconds))
-        else:
-            self._sleep_between_attempts(attempt)
+            return min(retry_after, self._config.max_retry_after_seconds)
+        return self._backoff_delay(attempt)
 
     def _apply_proxy(self, proxy: Mapping[str, str] | None) -> None:
         """Update session proxy to *proxy*, clearing any previous setting."""
@@ -238,20 +232,25 @@ class SyncPolicyBase(ABC):
         No-op when ``min_request_interval_seconds`` is zero (the default)
         or when *host* is empty.
         """
+        wait = self._rate_limit_wait_seconds(host)
+        if wait > 0:
+            sleep(wait)
+
+    def _rate_limit_wait_seconds(self, host: str) -> float:
+        """Compute the remaining per-host politeness delay without sleeping."""
         if not host:
-            return
+            return 0.0
         interval = max(
             self._config.min_request_interval_seconds,
             self._crawl_delay_overrides.get(host, 0.0),
         )
         if interval <= 0:
-            return
+            return 0.0
         last = self._last_request_time.get(host)
-        if last is not None:
-            elapsed = monotonic() - last
-            remaining = interval - elapsed
-            if remaining > 0:
-                sleep(remaining)
+        if last is None:
+            return 0.0
+        elapsed = monotonic() - last
+        return max(0.0, interval - elapsed)
 
     def _build_meta(
         self,
@@ -387,11 +386,16 @@ class SyncPolicyBase(ABC):
         last_error: Exception | None = None
         last_blocked_response: Any = None
         last_blocked_retry_after: float | None = None
+        retry_delay = 0.0
         current_proxy: Mapping[str, str] | None = None
         if pool is not None:
             current_proxy = pool.next_proxy()
             self._apply_proxy(current_proxy)
         for _ in range(self._max_attempts()):
+            if attempts > 0:
+                wait = max(retry_delay, self._rate_limit_wait_seconds(host))
+                if wait > 0:
+                    sleep(wait)
             attempts += 1
             try:
                 response = request_fn()
@@ -407,7 +411,7 @@ class SyncPolicyBase(ABC):
                             pool.mark_failure(current_proxy)
                             current_proxy = pool.next_proxy()
                             self._apply_proxy(current_proxy)
-                        self._sleep_for_retry_after(
+                        retry_delay = self._retry_delay(
                             last_blocked_retry_after, attempts
                         )
                         continue
@@ -456,7 +460,7 @@ class SyncPolicyBase(ABC):
                     pool.mark_failure(current_proxy)
                     current_proxy = pool.next_proxy()
                     self._apply_proxy(current_proxy)
-                self._sleep_between_attempts(attempts)
+                retry_delay = self._backoff_delay(attempts)
             finally:
                 if host:
                     self._last_request_time[host] = monotonic()

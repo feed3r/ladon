@@ -1,4 +1,6 @@
 # pyright: reportUnknownMemberType=false
+import warnings
+
 import pytest
 
 from ladon.networking.config import HttpClientConfig
@@ -13,7 +15,7 @@ def test_config_defaults_are_stable():
     assert config.verify_tls is True
     assert config.connect_timeout_seconds is None
     assert config.read_timeout_seconds is None
-    assert config.backoff_base_seconds == 0.0
+    assert config.backoff_base_seconds == 0.5
     assert config.timeout_seconds == 30.0
     assert config.min_request_interval_seconds == 0.0
     assert config.circuit_breaker_failure_threshold is None
@@ -68,6 +70,17 @@ def test_config_rejects_negative_retries():
 def test_config_rejects_negative_backoff():
     with pytest.raises(ValueError):
         HttpClientConfig(backoff_base_seconds=-0.1)
+
+
+def test_config_zero_backoff_with_retries_warns():
+    with pytest.warns(UserWarning, match="explicit opt-out"):
+        HttpClientConfig(retries=1, backoff_base_seconds=0.0)
+
+
+def test_config_zero_backoff_without_retries_does_not_warn():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        HttpClientConfig(retries=0, backoff_base_seconds=0.0)
 
 
 def test_config_rejects_non_positive_timeouts():

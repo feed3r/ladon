@@ -3,7 +3,7 @@ status: accepted
 date: 2026-03-18
 decision-makers: [Maintainers]
 informed: [Contributors]
-refs: [ADR-001, ADR-002, "Issue #38", "Issue #160", "Issue #165"]
+refs: [ADR-001, ADR-002, "Issue #38", "Issue #160", "Issue #165", "Issue #167"]
 ---
 
 # ADR-007 — Per-Host Circuit Breaker
@@ -96,6 +96,20 @@ independent of ADR-002's result contract: a 5xx response can remain `Ok(...)`
 for caller-owned status interpretation while still contributing one failure
 for the logical call sequence. Statuses handled by `retry_on_status`, including
 4xx statuses such as 429, record one failure only after retries are exhausted.
+
+### Polite retry pacing amendment (2026-08-12, Issue #167)
+
+The default exponential-backoff base is `0.5` seconds so a retryable response
+without a `Retry-After` header cannot immediately re-fire under default
+configuration. Setting `backoff_base_seconds=0.0` remains supported as an
+explicit opt-out and emits `UserWarning` when retries are enabled.
+
+Every retry attempt re-evaluates its host's politeness interval, including any
+robots.txt `Crawl-delay` override. Retry-After or exponential backoff and the
+remaining per-host interval are merged by taking their maximum, producing one
+sleep between attempts. Async clients perform this merged wait and timestamp
+reservation while holding the existing per-host lock, preserving staggered
+starts for concurrent callers.
 
 ## Consequences
 

@@ -115,7 +115,7 @@ class HttpClientConfig:
     verify_tls: bool = True
     connect_timeout_seconds: float | None = None
     read_timeout_seconds: float | None = None
-    backoff_base_seconds: float = 0.0
+    backoff_base_seconds: float = 0.5
     timeout_seconds: float = 30.0
     min_request_interval_seconds: float = 0.0
     # Threshold counts *call sequences*, not individual HTTP attempts.
@@ -161,6 +161,13 @@ class HttpClientConfig:
             raise ValueError("retries must be >= 0")
         if self.backoff_base_seconds < 0:
             raise ValueError("backoff_base_seconds must be >= 0")
+        if self.backoff_base_seconds == 0.0 and self.retries > 0:
+            warnings.warn(
+                "backoff_base_seconds=0.0 disables retry pacing and is an "
+                "explicit opt-out",
+                UserWarning,
+                stacklevel=3,
+            )
         if self.min_request_interval_seconds < 0:
             raise ValueError("min_request_interval_seconds must be >= 0")
         if (
