@@ -73,8 +73,9 @@ and explicitly fatal `AssetDownloadError` still propagate.
 ## Async leaf processing for high throughput
 
 Implement the async protocols (`async def expand` and `async def consume`) and
-pass an `AsyncHttpClient`. Expanders are awaited in tree order; leaf
-`consume()` calls run concurrently up to `async_concurrency`.
+pass an `AsyncHttpClientProtocol` implementation. Expanders are awaited in
+tree order; leaf `consume()` calls run concurrently up to
+`async_concurrency`.
 
 ```python
 --8<-- "examples/cookbook/async_crawl.py:example"

@@ -30,7 +30,8 @@ root processing ordered, while each root's leaf work uses `async_concurrency`.
 ## Async protocols
 
 The async protocols mirror the sync ones exactly but use `async def`
-methods and accept `AsyncHttpClient` instead of `HttpClient`.
+methods and accept `AsyncHttpClientProtocol` instead of
+`SyncHttpClientProtocol`.
 
 ::: ladon.plugins.async_protocol
 

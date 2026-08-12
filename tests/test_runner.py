@@ -10,11 +10,12 @@ never use it; the runner passes it through without inspecting it.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
 
 import pytest
 
+from ladon.networking.protocols import SyncHttpClientProtocol
 from ladon.plugins.errors import (
     AssetDownloadError,
     ChildListUnavailableError,
@@ -23,6 +24,7 @@ from ladon.plugins.errors import (
     PartialExpansionError,
 )
 from ladon.plugins.models import Expansion, Ref
+from ladon.plugins.protocol import CrawlPlugin, Expander, Sink, Source
 from ladon.runner import (
     CrawlPlan,
     RunConfig,
@@ -68,18 +70,23 @@ class _MockSink:
         return _DemoLeafRecord(leaf_id=r.url.split("/")[-1], url=r.url)
 
 
+class _MockSource:
+    def discover(self, client: SyncHttpClientProtocol) -> Sequence[object]:
+        return ()
+
+
 class _MockPlugin:
     def __init__(self, child_refs: list[Ref]) -> None:
-        self.expanders: list[Any] = [_MockExpander(child_refs)]
-        self.sink: Any = _MockSink()
+        self.source: Source = _MockSource()
+        self.expanders: Sequence[Expander] = (_MockExpander(child_refs),)
+        self.sink: Sink = _MockSink()
 
     @property
     def name(self) -> str:
         return "mock_plugin"
 
-    @property
-    def source(self) -> object:
-        return object()
+
+_typed_plugin: CrawlPlugin = _MockPlugin([])
 
 
 # ---------------------------------------------------------------------------

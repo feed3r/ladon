@@ -38,8 +38,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Protocol, Sequence, runtime_checkable
 
-from ..networking.client import HttpClient
 from ..networking.errors import HttpClientError
+from ..networking.protocols import SyncHttpClientProtocol
 from ..observability import DecisionEvent, DecisionTracker, NullDecisionTracker
 from .errors import LeafUnavailableError
 from .models import Ref
@@ -147,7 +147,7 @@ class MultiSourceSink:
     # ------------------------------------------------------------------
 
     def _fetch_from_source(
-        self, _source: Any, _ref: Ref, _client: HttpClient
+        self, _source: Any, _ref: Ref, _client: SyncHttpClientProtocol
     ) -> bytes | None:
         """Fetch raw bytes from *source* for *ref*. Must be overridden."""
         raise NotImplementedError(
@@ -208,7 +208,7 @@ class MultiSourceSink:
         return self._first_failing_predicate(data, ref) is None
 
     def resolve_multi(
-        self, ref: Ref, client: HttpClient, *, run_id: str = ""
+        self, ref: Ref, client: SyncHttpClientProtocol, *, run_id: str = ""
     ) -> tuple[bytes | None, Any | None]:
         """Try sources in priority order; return the best accepted result.
 

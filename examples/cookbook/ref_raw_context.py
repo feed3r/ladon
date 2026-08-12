@@ -18,6 +18,7 @@ from ladon import (
     Ref,
     RunConfig,
     RunResult,
+    SyncHttpClientProtocol,
     run_crawl,
 )
 
@@ -61,7 +62,7 @@ def build_mock_server() -> tuple[ThreadingHTTPServer, Thread]:
 
 
 class ProductList:
-    def expand(self, ref: Ref, client: HttpClient) -> Expansion:
+    def expand(self, ref: Ref, client: SyncHttpClientProtocol) -> Expansion:
         response = client.get(ref.url)
         if not response.ok or response.value is None:
             raise ChildListUnavailableError(f"listing failed: {response.error}")
@@ -77,14 +78,16 @@ class ProductList:
 
 
 class ProductSink:
-    def consume(self, ref: Ref, client: HttpClient) -> dict[str, object]:
+    def consume(
+        self, ref: Ref, client: SyncHttpClientProtocol
+    ) -> dict[str, object]:
         if "sku" not in ref.raw:
             raise LeafUnavailableError("listing did not provide a SKU")
         return {"sku": ref.raw["sku"], "price": ref.raw["price"]}
 
 
 class ProductSource:
-    def discover(self, client: HttpClient) -> Sequence[Ref]:
+    def discover(self, client: SyncHttpClientProtocol) -> Sequence[Ref]:
         return ()
 
 

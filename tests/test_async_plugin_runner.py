@@ -10,7 +10,7 @@ from typing import cast
 import pytest
 
 from ladon.async_runner import async_run_plugin
-from ladon.networking.async_client import AsyncHttpClient
+from ladon.networking.protocols import AsyncHttpClientProtocol
 from ladon.plugins.async_protocol import (
     AsyncCrawlPlugin,
     AsyncExpander,
@@ -36,7 +36,7 @@ class _AsyncSource:
         self._refs = refs
         self.calls = 0
 
-    async def discover(self, client: AsyncHttpClient) -> Sequence[Ref]:
+    async def discover(self, client: AsyncHttpClientProtocol) -> Sequence[Ref]:
         self.calls += 1
         return self._refs
 
@@ -50,7 +50,9 @@ class _AsyncExpander:
         self._error = error
         self._error_for = error_for
 
-    async def expand(self, ref: object, client: AsyncHttpClient) -> Expansion:
+    async def expand(
+        self, ref: object, client: AsyncHttpClientProtocol
+    ) -> Expansion:
         if self._error is not None:
             raise self._error
         assert isinstance(ref, Ref)
@@ -68,7 +70,9 @@ class _AsyncSink:
     def __init__(self, fail: Callable[[Ref], bool] | None = None) -> None:
         self._fail: Callable[[Ref], bool] = fail or _never_fail
 
-    async def consume(self, ref: object, client: AsyncHttpClient) -> _Record:
+    async def consume(
+        self, ref: object, client: AsyncHttpClientProtocol
+    ) -> _Record:
         assert isinstance(ref, Ref)
         if self._fail(ref):
             raise LeafUnavailableError("unavailable")
@@ -113,7 +117,9 @@ async def test_runs_every_discovered_root_and_aggregates_results() -> None:
     plugin = _AsyncPlugin(_refs())
 
     result = await async_run_plugin(
-        cast(AsyncCrawlPlugin, plugin), cast(AsyncHttpClient, None), RunConfig()
+        cast(AsyncCrawlPlugin, plugin),
+        cast(AsyncHttpClientProtocol, None),
+        RunConfig(),
     )
 
     assert isinstance(result, PluginRunResult)
@@ -131,7 +137,9 @@ async def test_empty_discovery_returns_zero_count_aggregate() -> None:
     plugin = _AsyncPlugin(())
 
     result = await async_run_plugin(
-        cast(AsyncCrawlPlugin, plugin), cast(AsyncHttpClient, None), RunConfig()
+        cast(AsyncCrawlPlugin, plugin),
+        cast(AsyncHttpClientProtocol, None),
+        RunConfig(),
     )
 
     assert isinstance(plugin.source, _AsyncSource)
@@ -155,7 +163,7 @@ async def test_forwards_on_leaf_to_each_single_root_run() -> None:
 
     result = await async_run_plugin(
         cast(AsyncCrawlPlugin, plugin),
-        cast(AsyncHttpClient, None),
+        cast(AsyncHttpClientProtocol, None),
         RunConfig(),
         on_leaf=on_leaf,
     )
@@ -167,7 +175,7 @@ async def test_forwards_on_leaf_to_each_single_root_run() -> None:
 async def test_applies_leaf_limit_to_each_discovered_root() -> None:
     result = await async_run_plugin(
         cast(AsyncCrawlPlugin, _AsyncPlugin(_refs())),
-        cast(AsyncHttpClient, None),
+        cast(AsyncHttpClientProtocol, None),
         RunConfig(leaf_limit=1),
     )
 
@@ -181,7 +189,9 @@ async def test_aggregates_leaf_errors_with_root_index() -> None:
     )
 
     result = await async_run_plugin(
-        cast(AsyncCrawlPlugin, plugin), cast(AsyncHttpClient, None), RunConfig()
+        cast(AsyncCrawlPlugin, plugin),
+        cast(AsyncHttpClientProtocol, None),
+        RunConfig(),
     )
 
     assert result.leaves_consumed == 3
@@ -193,7 +203,9 @@ async def test_aggregates_leaf_errors_with_root_index() -> None:
 
 async def test_discovery_errors_propagate() -> None:
     class _FailingSource(_AsyncSource):
-        async def discover(self, client: AsyncHttpClient) -> Sequence[Ref]:
+        async def discover(
+            self, client: AsyncHttpClientProtocol
+        ) -> Sequence[Ref]:
             raise RuntimeError("discovery failed")
 
     plugin = _AsyncPlugin(_refs())
@@ -202,7 +214,7 @@ async def test_discovery_errors_propagate() -> None:
     with pytest.raises(RuntimeError, match="discovery failed"):
         await async_run_plugin(
             cast(AsyncCrawlPlugin, plugin),
-            cast(AsyncHttpClient, None),
+            cast(AsyncHttpClientProtocol, None),
             RunConfig(),
         )
 
@@ -215,7 +227,7 @@ async def test_globally_fatal_root_errors_propagate() -> None:
     with pytest.raises(ExpansionNotReadyError, match="later"):
         await async_run_plugin(
             cast(AsyncCrawlPlugin, plugin),
-            cast(AsyncHttpClient, None),
+            cast(AsyncHttpClientProtocol, None),
             RunConfig(),
         )
 
@@ -223,7 +235,7 @@ async def test_globally_fatal_root_errors_propagate() -> None:
 async def test_asset_download_error_from_root_sink_propagates() -> None:
     class _FatalSink:
         async def consume(
-            self, ref: object, client: AsyncHttpClient
+            self, ref: object, client: AsyncHttpClientProtocol
         ) -> _Record:
             raise AssetDownloadError("asset host unavailable")
 
@@ -233,7 +245,7 @@ async def test_asset_download_error_from_root_sink_propagates() -> None:
     with pytest.raises(AssetDownloadError, match="asset host unavailable"):
         await async_run_plugin(
             cast(AsyncCrawlPlugin, plugin),
-            cast(AsyncHttpClient, None),
+            cast(AsyncHttpClientProtocol, None),
             RunConfig(),
         )
 
@@ -269,7 +281,7 @@ async def test_later_fatal_root_preserves_earlier_callback_side_effects() -> (
     with pytest.raises(ExpansionNotReadyError, match="later"):
         await async_run_plugin(
             cast(AsyncCrawlPlugin, plugin),
-            cast(AsyncHttpClient, None),
+            cast(AsyncHttpClientProtocol, None),
             RunConfig(),
             on_leaf=on_leaf,
         )

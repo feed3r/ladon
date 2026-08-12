@@ -4,8 +4,9 @@ Adapters implement these protocols by structural subtyping — no
 inheritance from this module is required. This keeps third-party
 plugins decoupled from Ladon internals.
 
-All adapters receive a configured HttpClient instance. They must not
-construct their own HTTP sessions or import ``requests`` directly.
+All adapters receive an object satisfying ``SyncHttpClientProtocol``: either
+the native ``HttpClient`` or curl-cffi ``CurlHttpClient`` implementation. They
+must not construct their own HTTP sessions or import ``requests`` directly.
 
 The three-layer pipeline is:
 
@@ -21,7 +22,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
-from ..networking.client import HttpClient
+from ..networking.protocols import SyncHttpClientProtocol
 from .models import Expansion
 
 
@@ -29,7 +30,7 @@ from .models import Expansion
 class Source(Protocol):
     """Discover top-level refs from an external source."""
 
-    def discover(self, client: HttpClient) -> Sequence[object]:
+    def discover(self, client: SyncHttpClientProtocol) -> Sequence[object]:
         """Return all discoverable top-level references."""
         ...
 
@@ -38,7 +39,7 @@ class Source(Protocol):
 class Expander(Protocol):
     """Expand one ref into a record plus child refs."""
 
-    def expand(self, ref: object, client: HttpClient) -> Expansion:
+    def expand(self, ref: object, client: SyncHttpClientProtocol) -> Expansion:
         """Fetch ref, return its record and the child refs to process next.
 
         Raises:
@@ -53,7 +54,7 @@ class Expander(Protocol):
 class Sink(Protocol):
     """Consume a leaf ref and return its final record."""
 
-    def consume(self, ref: object, client: HttpClient) -> object:
+    def consume(self, ref: object, client: SyncHttpClientProtocol) -> object:
         """Fetch and parse one leaf ref, returning a complete record.
 
         Context for the leaf (e.g. parent data) flows through

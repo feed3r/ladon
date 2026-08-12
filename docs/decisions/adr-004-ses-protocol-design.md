@@ -8,6 +8,10 @@ decision-makers:
 
 # ADR-004 — Source / Expander / Sink Protocol Design
 
+> **Historical note:** ADR-014 supersedes the concrete `HttpClient`
+> annotations shown in this record. Current sync adapter and runner boundaries
+> use `SyncHttpClientProtocol`.
+
 ## Context and Problem Statement
 
 Ladon is a generic crawling framework. Its networking core (`HttpClient`,

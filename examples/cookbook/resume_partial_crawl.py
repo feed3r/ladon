@@ -21,6 +21,7 @@ from ladon import (
     Ref,
     RunConfig,
     RunResult,
+    SyncHttpClientProtocol,
     run_crawl,
 )
 
@@ -61,7 +62,7 @@ def build_mock_server() -> tuple[ThreadingHTTPServer, Thread]:
     return server, thread
 
 
-def load_json(ref: Ref, client: HttpClient) -> dict[str, object]:
+def load_json(ref: Ref, client: SyncHttpClientProtocol) -> dict[str, object]:
     response = client.get(ref.url)
     if not response.ok or response.value is None:
         raise ChildListUnavailableError(f"request failed: {response.error}")
@@ -69,7 +70,7 @@ def load_json(ref: Ref, client: HttpClient) -> dict[str, object]:
 
 
 class CategoryList:
-    def expand(self, ref: Ref, client: HttpClient) -> Expansion:
+    def expand(self, ref: Ref, client: SyncHttpClientProtocol) -> Expansion:
         payload = load_json(ref, client)
         status = cast(str, payload["status"])
         if status == "not-ready":
@@ -86,7 +87,7 @@ class CategoryList:
 
 
 class ItemList:
-    def expand(self, ref: Ref, client: HttpClient) -> Expansion:
+    def expand(self, ref: Ref, client: SyncHttpClientProtocol) -> Expansion:
         payload = load_json(ref, client)
         if payload["status"] == "partial":
             raise PartialExpansionError("category still has another page")
@@ -97,7 +98,9 @@ class ItemList:
 
 
 class ItemSink:
-    def consume(self, ref: Ref, client: HttpClient) -> dict[str, object]:
+    def consume(
+        self, ref: Ref, client: SyncHttpClientProtocol
+    ) -> dict[str, object]:
         response = client.get(ref.url)
         if not response.ok or response.value is None:
             raise LeafUnavailableError(f"item failed: {response.error}")
@@ -105,7 +108,7 @@ class ItemSink:
 
 
 class LocalSource:
-    def discover(self, client: HttpClient) -> Sequence[Ref]:
+    def discover(self, client: SyncHttpClientProtocol) -> Sequence[Ref]:
         return ()
 
 
@@ -118,7 +121,7 @@ class LocalCatalogPlugin:
 
 
 def crawl_one(
-    top_ref: Ref, plugin: LocalCatalogPlugin, client: HttpClient
+    top_ref: Ref, plugin: LocalCatalogPlugin, client: SyncHttpClientProtocol
 ) -> RunResult | None:
     try:
         result = run_crawl(

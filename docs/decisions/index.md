@@ -19,6 +19,7 @@ chosen over the alternatives.
 | [ADR-010](adr-010-dual-license-model.md) | Dual-License Model (AGPL-3.0-only + Commercial) | Accepted |
 | [ADR-011](adr-011-curl-cffi-cloudflare-bypass.md) | curl-cffi as the Cloudflare-Bypass HTTP Backend | Accepted |
 | [ADR-012](adr-012-session-contract-boundary.md) | Session Contract Boundary in `SyncPolicyBase` | Accepted |
+| [ADR-014](adr-014-http-client-protocols.md) | Structural HTTP Client Protocols | Accepted |
 
 ## Format
 

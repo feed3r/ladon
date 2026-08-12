@@ -19,6 +19,7 @@ from ladon import (
     RobotsBlockedError,
     RunConfig,
     RunResult,
+    SyncHttpClientProtocol,
     run_crawl,
 )
 
@@ -57,7 +58,7 @@ class PublicPageSource:
     def __init__(self, base_url: str) -> None:
         self._base_url = base_url
 
-    def discover(self, client: HttpClient) -> Sequence[Ref]:
+    def discover(self, client: SyncHttpClientProtocol) -> Sequence[Ref]:
         return [
             Ref(f"{self._base_url}/allowed"),
             Ref(f"{self._base_url}/blocked"),
@@ -65,7 +66,7 @@ class PublicPageSource:
 
 
 class PublicPage:
-    def expand(self, ref: Ref, client: HttpClient) -> Expansion:
+    def expand(self, ref: Ref, client: SyncHttpClientProtocol) -> Expansion:
         response = client.get(ref.url)
         if isinstance(response.error, RobotsBlockedError):
             raise response.error
@@ -79,7 +80,9 @@ class PublicPage:
 
 
 class PublicPageSink:
-    def consume(self, ref: Ref, client: HttpClient) -> dict[str, object]:
+    def consume(
+        self, ref: Ref, client: SyncHttpClientProtocol
+    ) -> dict[str, object]:
         response = client.get(ref.url)
         if not response.ok or response.value is None:
             raise LeafUnavailableError(f"item failed: {response.error}")

@@ -24,6 +24,10 @@ from .networking.errors import (
     RobotsBlockedError,
     TransientNetworkError,
 )
+from .networking.protocols import (
+    AsyncHttpClientProtocol,
+    SyncHttpClientProtocol,
+)
 from .networking.proxy_pool import ProxyPool, RoundRobinProxyPool
 from .networking.types import Result
 from .observability import DecisionEvent, DecisionTracker, NullDecisionTracker
@@ -113,6 +117,8 @@ __all__ = [
     "AsyncHttpClient",
     "CurlHttpClient",
     "AsyncCurlHttpClient",
+    "SyncHttpClientProtocol",
+    "AsyncHttpClientProtocol",
     "make_http_client",
     "make_async_http_client",
     "HttpClientConfig",
