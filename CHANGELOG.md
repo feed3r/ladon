@@ -20,6 +20,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Consistent runner leaf-exception semantics** — sync crawls now record an
+  unexpected non-fatal `Sink.consume()` exception and continue with remaining
+  leaves instead of aborting and losing the partial result. Async crawls now
+  propagate leaf cancellation instead of silently counting it as a failure.
+  Consequently, the CLI now exits with code 2 for an ordinary
+  `Sink.consume()` exception recorded as a partial leaf failure; exit code 1
+  remains reserved for exceptions the runner does not isolate.
 - **Circuit-breaker HTTP 5xx accounting** — returned 5xx responses now count
   as origin-health failures without changing their `Ok(...)` result contract;
   non-retryable 4xx responses remain successful breaker outcomes.

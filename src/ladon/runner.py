@@ -34,6 +34,7 @@ from typing import Callable
 
 from ladon.networking.client import HttpClient
 from ladon.plugins.errors import (
+    AssetDownloadError,
     ChildListUnavailableError,
     ExpansionNotReadyError,
     LeafUnavailableError,
@@ -42,6 +43,35 @@ from ladon.plugins.errors import (
 from ladon.plugins.protocol import CrawlPlugin
 
 logger = logging.getLogger(__name__)
+
+FATAL_PLUGIN_ERRORS = (
+    AssetDownloadError,
+    ExpansionNotReadyError,
+    PartialExpansionError,
+    ChildListUnavailableError,
+)
+
+
+def log_leaf_exception(
+    exc: BaseException, ref_index: int, plugin_name: str
+) -> None:
+    """Log an unclassified or fatal leaf exception consistently."""
+    message = (
+        "leaf consume failed — ref[%d] error=%s"
+        if isinstance(exc, Exception)
+        else "leaf task did not complete — ref[%d] error=%s"
+    )
+    logger.error(
+        message,
+        ref_index,
+        exc,
+        extra={
+            "plugin": plugin_name,
+            "ref_index": ref_index,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        },
+    )
 
 
 @dataclass(frozen=True)
@@ -124,20 +154,21 @@ class RunResult:
     without raising.  When no callback is supplied, ``leaves_persisted``
     equals ``leaves_consumed`` (the pipeline trivially succeeds after consume).
 
-    ``leaves_failed`` counts leaves for which ``sink.consume()`` failed.
-    Callback failures are NOT included here — derive them from
-    ``leaves_consumed - leaves_persisted``.
+    ``leaves_failed`` counts leaves for which ``sink.consume()`` raised a
+    non-fatal exception. Callback failures are NOT included here — derive them
+    from ``leaves_consumed - leaves_persisted``.
 
     The following invariant always holds::
 
         leaves_consumed + leaves_failed == total leaves passed to Phase 3
                                           (after leaf_limit is applied)
 
-    ``errors`` accumulates both expander branch failures (Phase 1, format
-    ``"expander branch '...': ..."`` ) and leaf-level failures (Phase 3,
-    format ``"ref[N]: ..."`` ).  A result with ``leaves_failed == 0`` may
-    still contain branch errors — always inspect ``errors`` for a complete
-    picture of what went wrong.
+    ``errors`` accumulates expander branch failures (Phase 1, format
+    ``"expander branch '...': ..."``) and leaf-level failures (Phase 3,
+    formats ``"ref[N] consume failed: ..."`` and
+    ``"ref[N] callback failed: ..."``). A result with ``leaves_failed == 0``
+    may still contain branch or callback errors — always inspect ``errors``
+    for a complete picture of what went wrong.
     """
 
     record: object
@@ -215,17 +246,21 @@ def run_crawl(
         RunResult with counts and any per-leaf error messages.
 
     Raises:
-        ExpansionNotReadyError:     Raised from any expander. The ref (or
-                                    an intermediate ref) is not yet ready.
+        ExpansionNotReadyError:     Raised from any expander or the Sink. The
+                                    ref (or an intermediate ref) is not ready.
                                     Caller should record the event and
                                     move on; retry on the next scheduled run.
-        PartialExpansionError:      Raised only from the first expander.
+        PartialExpansionError:      Raised from the first expander or Sink.
                                     From non-first expanders the failing
                                     branch is isolated and recorded in
                                     RunResult.errors instead.
-        ChildListUnavailableError:  Raised only from the first expander.
+        ChildListUnavailableError:  Raised from the first expander or Sink.
                                     Same isolation rule applies to non-first
                                     expanders as for PartialExpansionError.
+        AssetDownloadError:         Raised from the Sink or an Expander. This
+                                    explicitly fatal plugin error propagates.
+        BaseException:              KeyboardInterrupt and other fatal errors
+                                    propagate unchanged.
         ValueError:                 Plugin has no expanders configured.
     """
     if not plugin.expanders:
@@ -316,6 +351,17 @@ def run_crawl(
                 },
             )
             continue
+        except FATAL_PLUGIN_ERRORS as exc:
+            log_leaf_exception(exc, i, plugin.name)
+            raise
+        except Exception as exc:
+            leaves_failed += 1
+            errors.append(f"ref[{i}] consume failed: {exc}")
+            log_leaf_exception(exc, i, plugin.name)
+            continue
+        except BaseException as exc:
+            log_leaf_exception(exc, i, plugin.name)
+            raise
 
         leaves_consumed += 1
 
@@ -336,6 +382,9 @@ def run_crawl(
                         "error": str(exc),
                     },
                 )
+            except BaseException as exc:
+                log_leaf_exception(exc, i, plugin.name)
+                raise
         else:
             leaves_persisted += 1
 
@@ -385,11 +434,22 @@ def run_plugin(
         A PluginRunResult containing source-order per-root outcomes and totals.
 
     Raises:
-        Exception: Propagates exceptions from ``source.discover`` and
-            :func:`run_crawl`. Globally fatal expansion errors are never
-            converted into a partial aggregate. Roots completed before a later
-            fatal error may already have invoked ``on_leaf``; callbacks must
-            therefore be idempotent when the caller retries the whole plugin.
+        ExpansionNotReadyError: Propagates unchanged from a per-root
+            :func:`run_crawl` invocation.
+        PartialExpansionError: Propagates unchanged from a per-root
+            :func:`run_crawl` invocation.
+        ChildListUnavailableError: Propagates unchanged from a per-root
+            :func:`run_crawl` invocation. Per that function's own ``Raises:``
+            contract, globally fatal expansion errors are never converted into
+            a partial aggregate. Roots completed before a later fatal error may
+            already have invoked ``on_leaf``; callbacks must therefore be
+            idempotent when the caller retries the whole plugin.
+        AssetDownloadError: A Sink or Expander raised this explicitly fatal
+            plugin error while processing a discovered root.
+        Exception: Propagates ordinary exceptions from ``source.discover`` and
+            :func:`run_crawl`.
+        BaseException: KeyboardInterrupt and other fatal errors from a per-root
+            :func:`run_crawl` invocation propagate unchanged.
     """
 
     top_refs = tuple(plugin.source.discover(client))
@@ -490,12 +550,25 @@ def execute_plan_sync(
                      after each successful consume.  Note: second argument is the
                      **leaf ref**, not a parent record (see ADR-011).
         on_progress: Optional callback receiving ``(leaves_done, total_leaves)``
-                     after each leaf attempt (success or failure).  Exceptions
-                     raised by this callback are logged and swallowed.
+                     after each leaf attempt (success or failure).  Ordinary
+                     ``Exception`` subclasses raised by this callback are logged
+                     and swallowed.  A ``BaseException`` propagates instead,
+                     pre-empting a pending fatal plugin exception under the
+                     severity-tier convention while preserving it in
+                     ``__context__``.
 
     Returns:
         RunResult with counts and any per-leaf error messages.  Phase 1
         errors from the plan are carried forward into ``RunResult.errors``.
+
+    Raises:
+        ExpansionNotReadyError: Raised from the Sink and propagates.
+        PartialExpansionError: Raised from the Sink and propagates.
+        ChildListUnavailableError: Raised from the Sink and propagates.
+        AssetDownloadError: Raised from the Sink. This explicitly fatal
+                            plugin error propagates.
+        BaseException:      KeyboardInterrupt and other fatal errors raised by
+                            the Sink or ``on_leaf`` propagate unchanged.
     """
     leaves = plan.leaves
     if config.leaf_limit > 0:
@@ -513,6 +586,21 @@ def execute_plan_sync(
     leaves_failed = 0
     errors: list[str] = list(plan.errors)
 
+    def _fire_progress(done: int, ref_index: int) -> None:
+        if on_progress is not None:
+            try:
+                on_progress(done, total)
+            except Exception as _exc:
+                logger.warning(
+                    "on_progress callback raised — ref[%d]: %s",
+                    ref_index,
+                    _exc,
+                    extra={
+                        "plugin": plugin.name,
+                        "ref_index": ref_index,
+                    },
+                )
+
     for i, leaf_ref in enumerate(leaves):
         try:
             leaf_record = plugin.sink.consume(leaf_ref, client)
@@ -529,17 +617,24 @@ def execute_plan_sync(
                     "error": str(exc),
                 },
             )
-            if on_progress is not None:
-                try:
-                    on_progress(leaves_consumed + leaves_failed, total)
-                except Exception as _exc:
-                    logger.warning(
-                        "on_progress callback raised — ref[%d]: %s",
-                        i,
-                        _exc,
-                        extra={"plugin": plugin.name, "ref_index": i},
-                    )
+            _fire_progress(leaves_consumed + leaves_failed, i)
             continue
+        except FATAL_PLUGIN_ERRORS as exc:
+            log_leaf_exception(exc, i, plugin.name)
+            # Progress includes the current attempt even though it aborts the run.
+            _fire_progress(leaves_consumed + leaves_failed + 1, i)
+            raise
+        except Exception as exc:
+            leaves_failed += 1
+            errors.append(f"ref[{i}] consume failed: {exc}")
+            log_leaf_exception(exc, i, plugin.name)
+            _fire_progress(leaves_consumed + leaves_failed, i)
+            continue
+        except BaseException as exc:
+            log_leaf_exception(exc, i, plugin.name)
+            # Progress includes the current attempt even though it aborts the run.
+            _fire_progress(leaves_consumed + leaves_failed + 1, i)
+            raise
 
         leaves_consumed += 1
 
@@ -559,19 +654,16 @@ def execute_plan_sync(
                         "error": str(exc),
                     },
                 )
+            except BaseException as exc:
+                # The consume completed, but this leaf's callback attempt is
+                # still complete for progress purposes before propagation.
+                log_leaf_exception(exc, i, plugin.name)
+                _fire_progress(leaves_consumed + leaves_failed, i)
+                raise
         else:
             leaves_persisted += 1
 
-        if on_progress is not None:
-            try:
-                on_progress(leaves_consumed + leaves_failed, total)
-            except Exception as _exc:
-                logger.warning(
-                    "on_progress callback raised — ref[%d]: %s",
-                    i,
-                    _exc,
-                    extra={"plugin": plugin.name, "ref_index": i},
-                )
+        _fire_progress(leaves_consumed + leaves_failed, i)
 
     logger.info(
         "execute_plan_sync finished",

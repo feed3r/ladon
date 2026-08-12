@@ -19,12 +19,13 @@ The plan/execute split (v0.3):
 the sync runner: when any expander raises it, the coroutine raises immediately
 and the caller must schedule a retry.
 
-``LeafUnavailableError`` is isolated per leaf: a single failed ``consume()``
-call does not cancel other in-flight leaf tasks.
+Ordinary exceptions from a leaf ``consume()`` call are isolated per leaf and
+recorded in ``RunResult.errors``. ``AssetDownloadError`` retains its explicitly
+fatal contract, while cancellation and other ``BaseException`` subclasses
+propagate unchanged.
 
-``asyncio.gather(return_exceptions=True)`` is used deliberately so that an
-unexpected exception in one leaf task does not cancel the others.  Unexpected
-exceptions are recorded in ``RunResult.errors`` as leaf failures.
+``asyncio.gather(return_exceptions=True)`` is used deliberately so sibling
+leaf tasks finish before a fatal exception or cancellation is propagated.
 """
 
 from __future__ import annotations
@@ -32,8 +33,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import warnings
 from collections.abc import Awaitable, Callable
+from typing import cast
 
 from ladon.networking.async_client import AsyncHttpClient
 from ladon.plugins.async_protocol import AsyncCrawlPlugin
@@ -44,13 +45,41 @@ from ladon.plugins.errors import (
     PartialExpansionError,
 )
 from ladon.runner import (
+    FATAL_PLUGIN_ERRORS,
     CrawlPlan,
     PluginRunResult,
     RunConfig,
     RunResult,
+    log_leaf_exception,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _raise_first_fatal_outcome(
+    outcomes: list[tuple[bool, bool, list[str]] | BaseException],
+    *,
+    plugin_name: str,
+) -> list[tuple[bool, bool, list[str]]]:
+    """Log every fatal leaf outcome, then propagate the highest priority."""
+    first_exception: Exception | None = None
+    first_base_exception: BaseException | None = None
+    for i, outcome in enumerate(outcomes):
+        if not isinstance(outcome, BaseException):
+            continue
+        log_leaf_exception(outcome, i, plugin_name)
+        if isinstance(outcome, Exception):
+            if first_exception is None:
+                first_exception = outcome
+        elif first_base_exception is None:
+            first_base_exception = outcome
+
+    if first_base_exception is not None:
+        raise first_base_exception
+    if first_exception is not None:
+        raise first_exception
+
+    return cast(list[tuple[bool, bool, list[str]]], outcomes)
 
 
 async def async_run_crawl(
@@ -74,11 +103,16 @@ async def async_run_crawl(
         RunResult with counts and any per-leaf error messages.
 
     Raises:
-        ExpansionNotReadyError:     Any expander raised this. The ref is not
-                                    yet ready. Caller should retry on the next
-                                    scheduled run.
-        PartialExpansionError:      Raised only from the first expander.
-        ChildListUnavailableError:  Raised only from the first expander.
+        ExpansionNotReadyError:     Any expander or the Sink raised this. The
+                                    ref is not yet ready; retry on the next run.
+        PartialExpansionError:      Raised from the first expander or Sink.
+        ChildListUnavailableError:  Raised from the first expander or Sink.
+        AssetDownloadError:         Raised from the Sink or an Expander. This
+                                    explicitly fatal plugin error propagates.
+        asyncio.CancelledError:     A leaf consume or ``on_leaf`` callback was
+                                    cancelled.
+        BaseException:              Other fatal BaseException subclasses raised
+                                    by a leaf task propagate unchanged.
         ValueError:                 Plugin has no expanders configured.
     """
     if not plugin.expanders:
@@ -138,7 +172,7 @@ async def async_run_crawl(
 
     async def _process_leaf(
         i: int, leaf_ref: object, parent_record: object
-    ) -> tuple[bool, bool, list[str]]:
+    ) -> tuple[bool, bool, list[str]] | BaseException:
         """Returns (consumed, persisted, leaf_errors).
 
         consumed=True  when sink.consume() succeeded.
@@ -165,6 +199,17 @@ async def async_run_crawl(
                     },
                 )
                 return (False, False, [f"ref[{i}] consume failed: {exc}"])
+            except FATAL_PLUGIN_ERRORS:
+                raise
+            except Exception as exc:
+                log_leaf_exception(exc, i, plugin.name)
+                return (False, False, [f"ref[{i}] consume failed: {exc}"])
+            except BaseException as exc:
+                # Any non-Exception BaseException that escapes a Task can be
+                # mangled or crash the event loop through CPython's Task
+                # machinery. Return it as a value so the caller receives the
+                # original exception unchanged.
+                return exc
 
             if on_leaf is not None:
                 try:
@@ -183,6 +228,12 @@ async def async_run_crawl(
                         },
                     )
                     return (True, False, [f"ref[{i}] callback failed: {exc}"])
+                except BaseException as exc:
+                    # Any non-Exception BaseException that escapes a Task can be
+                    # mangled or crash the event loop through CPython's Task
+                    # machinery. Return it as a value so the caller receives the
+                    # original exception unchanged.
+                    return exc
 
             return (True, True, [])
 
@@ -198,25 +249,18 @@ async def async_run_crawl(
     leaves_persisted = 0
     leaves_failed = 0
 
-    for i, outcome in enumerate(outcomes):
-        if isinstance(outcome, BaseException):
-            leaves_failed += 1
-            errors.append(f"ref[{i}]: unexpected error: {outcome}")
-            logger.error(
-                "unexpected leaf error — ref[%d]: %s",
-                i,
-                outcome,
-                extra={"plugin": plugin.name, "ref_index": i},
-            )
+    leaf_outcomes = _raise_first_fatal_outcome(
+        outcomes, plugin_name=plugin.name
+    )
+
+    for consumed, persisted, leaf_errors in leaf_outcomes:
+        if consumed:
+            leaves_consumed += 1
         else:
-            consumed, persisted, leaf_errors = outcome
-            if consumed:
-                leaves_consumed += 1
-            else:
-                leaves_failed += 1
-            if persisted:
-                leaves_persisted += 1
-            errors.extend(leaf_errors)
+            leaves_failed += 1
+        if persisted:
+            leaves_persisted += 1
+        errors.extend(leaf_errors)
 
     logger.info(
         "async_run_crawl finished",
@@ -255,6 +299,19 @@ async def async_run_plugin(
     than being converted into a partial aggregate. Earlier roots may already
     have invoked ``on_leaf`` when a later root aborts, so callbacks must be
     idempotent if the caller retries the plugin.
+
+    Raises:
+        ExpansionNotReadyError: Propagates unchanged from a per-root
+            :func:`async_run_crawl` invocation.
+        PartialExpansionError: Propagates unchanged from a per-root
+            :func:`async_run_crawl` invocation.
+        ChildListUnavailableError: Propagates unchanged from a per-root
+            :func:`async_run_crawl` invocation, per that function's own
+            ``Raises:`` contract.
+        AssetDownloadError: A Sink or Expander raised this explicitly fatal
+            plugin error while processing a discovered root.
+        BaseException: Cancellation and other fatal errors from a per-root
+            :func:`async_run_crawl` invocation propagate unchanged.
     """
 
     top_refs = tuple(await plugin.source.discover(client))
@@ -364,19 +421,37 @@ async def execute_plan(
                      (success or failure).  Called from inside concurrent leaf
                      tasks — order matches completion order, not input order.
                      Async callables are not supported; passing an ``async def``
-                     raises ``TypeError`` at call time because the coroutine
-                     object is not awaited.  Exceptions raised by this callback
-                     are logged and swallowed.
+                     raises ``TypeError`` before leaf processing begins.
+                     Ordinary ``Exception`` subclasses raised by this callback
+                     are logged and swallowed.  A ``BaseException`` propagates
+                     instead, pre-empting a pending fatal plugin exception under
+                     the severity-tier convention while preserving it in
+                     ``__context__``.
 
     Returns:
         RunResult with counts and any per-leaf error messages.  Phase 1
         errors from the plan are carried forward into ``RunResult.errors``.
+
+    Raises:
+        ExpansionNotReadyError: Raised from the Sink and propagates.
+        PartialExpansionError: Raised from the Sink and propagates.
+        ChildListUnavailableError: Raised from the Sink and propagates.
+        AssetDownloadError:     Raised from the Sink. This explicitly fatal
+                                plugin error propagates.
+        TypeError:               ``on_progress`` is an async callable; only
+                                synchronous callables are supported.
+        asyncio.CancelledError: A leaf consume or ``on_leaf`` callback, or an
+                                ``on_progress`` callback, was cancelled.
+        BaseException:          Other fatal BaseException subclasses raised
+                                by a leaf task propagate unchanged.
     """
-    if on_progress is not None and inspect.iscoroutinefunction(on_progress):
-        warnings.warn(
-            "on_progress must be a synchronous callable; async callables are "
-            "not supported and the coroutine will not be awaited.",
-            stacklevel=2,
+    if on_progress is not None and (
+        inspect.iscoroutinefunction(on_progress)
+        or inspect.iscoroutinefunction(type(on_progress).__call__)
+    ):
+        raise TypeError(
+            "on_progress must be a synchronous callable; async callables "
+            "are not supported"
         )
     leaves = plan.leaves
     if config.leaf_limit > 0:
@@ -395,7 +470,7 @@ async def execute_plan(
 
     async def _process_leaf(
         i: int, leaf_ref: object
-    ) -> tuple[bool, bool, list[str]]:
+    ) -> tuple[bool, bool, list[str]] | BaseException:
         """Returns (consumed, persisted, leaf_errors).
 
         consumed=True  when sink.consume() succeeded.
@@ -404,7 +479,7 @@ async def execute_plan(
         """
         nonlocal done_count
 
-        def _fire_progress() -> None:
+        def _fire_progress() -> BaseException | None:
             if on_progress is not None:
                 try:
                     on_progress(done_count, total)
@@ -415,6 +490,12 @@ async def execute_plan(
                         _exc,
                         extra={"plugin": plugin.name, "ref_index": i},
                     )
+                except BaseException as _exc:
+                    # A CancelledError escaping a Task is replaced by gather
+                    # with a fresh, empty instance. Return every BaseException
+                    # as a value so identity and diagnostic text survive.
+                    return _exc
+            return None
 
         async with semaphore:
             try:
@@ -431,14 +512,36 @@ async def execute_plan(
                     },
                 )
                 done_count += 1
-                _fire_progress()
+                if (progress_error := _fire_progress()) is not None:
+                    return progress_error
                 return (False, False, [f"ref[{i}] consume failed: {exc}"])
+            except FATAL_PLUGIN_ERRORS:
+                done_count += 1
+                if (progress_error := _fire_progress()) is not None:
+                    return progress_error
+                raise
+            except Exception as exc:
+                log_leaf_exception(exc, i, plugin.name)
+                done_count += 1
+                if (progress_error := _fire_progress()) is not None:
+                    return progress_error
+                return (False, False, [f"ref[{i}] consume failed: {exc}"])
+            except BaseException as exc:
+                done_count += 1
+                if (progress_error := _fire_progress()) is not None:
+                    return progress_error
+                # Any non-Exception BaseException that escapes a Task can be
+                # mangled or crash the event loop through CPython's Task
+                # machinery. Return it as a value so the caller receives the
+                # original exception unchanged.
+                return exc
 
             if on_leaf is not None:
                 try:
                     await on_leaf(leaf_record, leaf_ref)
                     done_count += 1
-                    _fire_progress()
+                    if (progress_error := _fire_progress()) is not None:
+                        return progress_error
                     return (True, True, [])
                 except Exception as exc:
                     logger.warning(
@@ -452,11 +555,22 @@ async def execute_plan(
                         },
                     )
                     done_count += 1
-                    _fire_progress()
+                    if (progress_error := _fire_progress()) is not None:
+                        return progress_error
                     return (True, False, [f"ref[{i}] callback failed: {exc}"])
+                except BaseException as exc:
+                    done_count += 1
+                    if (progress_error := _fire_progress()) is not None:
+                        return progress_error
+                    # Any non-Exception BaseException that escapes a Task can be
+                    # mangled or crash the event loop through CPython's Task
+                    # machinery. Return it as a value so the caller receives the
+                    # original exception unchanged.
+                    return exc
 
             done_count += 1
-            _fire_progress()
+            if (progress_error := _fire_progress()) is not None:
+                return progress_error
             return (True, True, [])
 
     outcomes = await asyncio.gather(
@@ -468,36 +582,18 @@ async def execute_plan(
     leaves_persisted = 0
     leaves_failed = 0
 
-    for i, outcome in enumerate(outcomes):
-        if isinstance(outcome, BaseException):
-            leaves_failed += 1
-            errors.append(f"ref[{i}]: unexpected error: {outcome}")
-            logger.error(
-                "unexpected leaf error — ref[%d]: %s",
-                i,
-                outcome,
-                extra={"plugin": plugin.name, "ref_index": i},
-            )
-            if on_progress is not None:
-                done_count += 1
-                try:
-                    on_progress(done_count, total)
-                except Exception as _exc:
-                    logger.warning(
-                        "on_progress callback raised — ref[%d]: %s",
-                        i,
-                        _exc,
-                        extra={"plugin": plugin.name, "ref_index": i},
-                    )
+    leaf_outcomes = _raise_first_fatal_outcome(
+        outcomes, plugin_name=plugin.name
+    )
+
+    for consumed, persisted, leaf_errors in leaf_outcomes:
+        if consumed:
+            leaves_consumed += 1
         else:
-            consumed, persisted, leaf_errors = outcome
-            if consumed:
-                leaves_consumed += 1
-            else:
-                leaves_failed += 1
-            if persisted:
-                leaves_persisted += 1
-            errors.extend(leaf_errors)
+            leaves_failed += 1
+        if persisted:
+            leaves_persisted += 1
+        errors.extend(leaf_errors)
 
     logger.info(
         "execute_plan finished",
