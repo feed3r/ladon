@@ -16,12 +16,13 @@ from ladon import (
     PluginRunResult,
     Ref,
     RunConfig,
+    SyncHttpClientProtocol,
     run_plugin,
 )
 
 
 class GitHubIssuesSource:
-    def discover(self, client: HttpClient) -> Sequence[Ref]:
+    def discover(self, client: SyncHttpClientProtocol) -> Sequence[Ref]:
         return [
             Ref(
                 "https://api.github.com/repos/psf/requests/issues?per_page=5"
@@ -33,7 +34,7 @@ class GitHubIssuesSource:
 
 
 class IssueList:
-    def expand(self, ref: Ref, client: HttpClient) -> Expansion:
+    def expand(self, ref: Ref, client: SyncHttpClientProtocol) -> Expansion:
         response = client.get(ref.url)
         if not response.ok or response.value is None:
             raise ChildListUnavailableError(f"listing failed: {response.error}")
@@ -44,7 +45,9 @@ class IssueList:
 
 
 class IssueSink:
-    def consume(self, ref: Ref, client: HttpClient) -> dict[str, object]:
+    def consume(
+        self, ref: Ref, client: SyncHttpClientProtocol
+    ) -> dict[str, object]:
         response = client.get(ref.url)
         if not response.ok or response.value is None:
             raise LeafUnavailableError(f"issue failed: {response.error}")

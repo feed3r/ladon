@@ -32,7 +32,7 @@ import logging
 from dataclasses import dataclass
 from typing import Callable
 
-from ladon.networking.client import HttpClient
+from ladon.networking.protocols import SyncHttpClientProtocol
 from ladon.plugins.errors import (
     AssetDownloadError,
     ChildListUnavailableError,
@@ -227,7 +227,7 @@ class PluginRunResult:
 def run_crawl(
     top_ref: object,
     plugin: CrawlPlugin,
-    client: HttpClient,
+    client: SyncHttpClientProtocol,
     config: RunConfig,
     on_leaf: Callable[[object, object], None] | None = None,
 ) -> RunResult:
@@ -236,7 +236,7 @@ def run_crawl(
     Args:
         top_ref:  Reference to the resource to expand.
         plugin:   Crawl plugin providing source, expanders, and sink.
-        client:   Configured HttpClient instance.
+        client:   Configured synchronous HTTP client protocol implementation.
         config:   Run-level configuration (limits, flags).
         on_leaf:  Optional callback invoked after each successful leaf
                   consume. Use this hook for DB writes, serialization,
@@ -409,7 +409,7 @@ def run_crawl(
 
 def run_plugin(
     plugin: CrawlPlugin,
-    client: HttpClient,
+    client: SyncHttpClientProtocol,
     config: RunConfig,
     on_leaf: Callable[[object, object], None] | None = None,
 ) -> PluginRunResult:
@@ -426,7 +426,7 @@ def run_plugin(
 
     Args:
         plugin:  Crawl plugin providing a source, expanders, and sink.
-        client:  Configured HttpClient instance.
+        client:  Configured synchronous HTTP client protocol implementation.
         config:  Run configuration forwarded to each discovered root.
         on_leaf: Optional callback forwarded to each :func:`run_crawl` call.
 
@@ -463,7 +463,7 @@ def run_plugin(
 def plan_crawl_sync(
     top_ref: object,
     plugin: CrawlPlugin,
-    client: HttpClient,
+    client: SyncHttpClientProtocol,
 ) -> CrawlPlan:
     """Run Phase 1 (tree traversal) synchronously and return a CrawlPlan.
 
@@ -532,7 +532,7 @@ def plan_crawl_sync(
 def execute_plan_sync(
     plan: CrawlPlan,
     plugin: CrawlPlugin,
-    client: HttpClient,
+    client: SyncHttpClientProtocol,
     config: RunConfig,
     on_leaf: Callable[[object, object], None] | None = None,
     on_progress: Callable[[int, int], None] | None = None,
@@ -542,7 +542,7 @@ def execute_plan_sync(
     Args:
         plan:        Plan produced by ``plan_crawl_sync()``.
         plugin:      Crawl plugin whose sink consumes each leaf.
-        client:      Configured HttpClient instance.
+        client:      Configured synchronous HTTP client protocol implementation.
         config:      Run-level configuration (leaf_limit; async_concurrency ignored).
                      If the plan was already narrowed with ``CrawlPlan.limited_to()``,
                      both caps apply independently — the tighter of the two wins.

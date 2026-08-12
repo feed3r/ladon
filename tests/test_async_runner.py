@@ -16,12 +16,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
 
 import pytest
 
 from ladon.async_runner import async_run_crawl, execute_plan, plan_crawl
+from ladon.networking.protocols import AsyncHttpClientProtocol
+from ladon.plugins.async_protocol import (
+    AsyncCrawlPlugin,
+    AsyncExpander,
+    AsyncSink,
+    AsyncSource,
+)
 from ladon.plugins.errors import (
     AssetDownloadError,
     ChildListUnavailableError,
@@ -83,18 +90,27 @@ class _TypedAsyncExpansionFailureSink:
         raise self._error
 
 
+class _MockAsyncSource:
+    async def discover(
+        self, client: AsyncHttpClientProtocol
+    ) -> Sequence[object]:
+        return ()
+
+
 class _MockAsyncPlugin:
     def __init__(self, child_refs: list[Ref]) -> None:
-        self.expanders: list[Any] = [_MockAsyncExpander(child_refs)]
-        self.sink: Any = _MockAsyncSink()
+        self.source: AsyncSource = _MockAsyncSource()
+        self.expanders: Sequence[AsyncExpander] = (
+            _MockAsyncExpander(child_refs),
+        )
+        self.sink: AsyncSink = _MockAsyncSink()
 
     @property
     def name(self) -> str:
         return "mock_async_plugin"
 
-    @property
-    def source(self) -> object:
-        return object()
+
+_typed_async_plugin: AsyncCrawlPlugin = _MockAsyncPlugin([])
 
 
 # ---------------------------------------------------------------------------

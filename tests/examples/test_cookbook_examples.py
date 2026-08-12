@@ -11,7 +11,7 @@ import pytest
 
 from ladon import (
     AsyncCrawlPlugin,
-    AsyncHttpClient,
+    AsyncHttpClientProtocol,
     HttpClient,
     HttpClientConfig,
     Ref,
@@ -113,7 +113,7 @@ def test_async_crawl_consumes_and_persists_every_local_record(
     async def capture_persisted(
         top_ref: object,
         plugin: AsyncCrawlPlugin,
-        client: AsyncHttpClient,
+        client: AsyncHttpClientProtocol,
         config: RunConfig,
         on_leaf: Callable[[object, object], Awaitable[None]] | None = None,
     ) -> RunResult:

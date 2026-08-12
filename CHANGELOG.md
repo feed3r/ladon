@@ -11,6 +11,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`SyncHttpClientProtocol` / `AsyncHttpClientProtocol`** — public structural
+  HTTP client contracts implemented by both native and curl-cffi backends.
 - **`run_plugin()` / `async_run_plugin()`** — source-driven whole-plugin
   entry points. They discover roots once, preserve one `RunResult` per root,
   and return aggregate counts and source-indexed errors in `PluginRunResult`.
@@ -20,6 +22,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Backend-agnostic adapter and runner typing** — `Source`, `Expander`,
+  `Sink`, their async counterparts, and runner signatures now accept either
+  native or curl-cffi factory results under strict type checking.
 - **Polite retry pacing** — retries now enforce per-host rate limits, including
   robots.txt `Crawl-delay` overrides, on every attempt and merge that wait with
   Retry-After or backoff into one sleep. The default backoff is now a safe

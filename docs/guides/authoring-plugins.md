@@ -32,8 +32,10 @@ attributes set in `__init__` satisfy the protocol at runtime, so the common
 pattern is:
 
 ```python
+from ladon import SyncHttpClientProtocol
+
 class MyPlugin:
-    def __init__(self, client: HttpClient) -> None:
+    def __init__(self, client: SyncHttpClientProtocol) -> None:
         self.name = "my_plugin"
         self.source = MySource()
         self.expanders = [MyExpander()]
@@ -51,10 +53,13 @@ An `Expander` turns one ref into an `Expansion` — the current node's record
 plus the child refs to process next (e.g. catalog record + product URLs):
 
 ```python
+from ladon import SyncHttpClientProtocol
 from ladon.plugins.models import Expansion
 
 class MyExpander:
-    def expand(self, ref: object, client: HttpClient) -> Expansion:
+    def expand(
+        self, ref: object, client: SyncHttpClientProtocol
+    ) -> Expansion:
         """Fetch ref; return its record and child refs.
 
         Raises:
@@ -78,8 +83,12 @@ Expansion exception handling depends on where the failure occurs:
 A `Sink` processes each leaf ref (e.g. downloads a product page):
 
 ```python
+from ladon import SyncHttpClientProtocol
+
 class MySink:
-    def consume(self, ref: object, client: HttpClient) -> object:
+    def consume(
+        self, ref: object, client: SyncHttpClientProtocol
+    ) -> object:
         """Fetch and process the leaf; return a record for on_leaf callback."""
         ...
 ```
@@ -98,10 +107,10 @@ Expansion exceptions also retain their typed contract when raised by a Sink:
 Combine expanders and sink into a plugin:
 
 ```python
-from ladon.networking.client import HttpClient
+from ladon import SyncHttpClientProtocol
 
 class ShopPlugin:
-    def __init__(self, client: HttpClient) -> None:
+    def __init__(self, client: SyncHttpClientProtocol) -> None:
         self.name = "shop_example"
         self.source = CatalogSource()
         self.expanders = [CategoryExpander(), ProductExpander()]
@@ -152,11 +161,11 @@ callback). For production use write a Python script that usually calls
 
 For high-concurrency crawls implement `AsyncCrawlPlugin` and call
 `async_run_plugin()` instead. The async protocols mirror the sync ones with
-`async def` methods and `AsyncHttpClient` as the client parameter.
+`async def` methods and `AsyncHttpClientProtocol` as the client parameter.
 
 ```python
+from ladon import AsyncHttpClientProtocol
 from ladon.plugins.async_protocol import AsyncCrawlPlugin, AsyncExpander, AsyncSink, AsyncSource
-from ladon.networking.async_client import AsyncHttpClient
 
 class AsyncShopPlugin:
     def __init__(self) -> None:
@@ -167,7 +176,9 @@ class AsyncShopPlugin:
 
 
 class AsyncProductSink:
-    async def consume(self, ref: object, client: AsyncHttpClient) -> object:
+    async def consume(
+        self, ref: object, client: AsyncHttpClientProtocol
+    ) -> object:
         result = await client.get(str(ref))
         if not result.ok:
             from ladon.plugins.errors import LeafUnavailableError

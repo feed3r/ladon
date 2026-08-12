@@ -16,6 +16,7 @@ from .errors import (
     RobotsBlockedError,
     TransientNetworkError,
 )
+from .protocols import AsyncHttpClientProtocol, SyncHttpClientProtocol
 from .proxy_pool import ProxyPool, RoundRobinProxyPool, validate_proxy
 from .types import Result
 
@@ -66,6 +67,7 @@ def make_async_http_client(
 __all__ = [
     "AsyncCurlHttpClient",
     "AsyncHttpClient",
+    "AsyncHttpClientProtocol",
     "CircuitOpenError",
     "CircuitState",
     "CurlHttpClient",
@@ -82,4 +84,5 @@ __all__ = [
     "Result",
     "RobotsBlockedError",
     "TransientNetworkError",
+    "SyncHttpClientProtocol",
 ]

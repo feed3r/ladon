@@ -20,6 +20,7 @@ import pytest
 
 from ladon.networking.client import HttpClient
 from ladon.networking.config import HttpClientConfig
+from ladon.networking.protocols import SyncHttpClientProtocol
 from ladon.plugins.errors import (
     ChildListUnavailableError,
     ExpansionNotReadyError,
@@ -69,7 +70,7 @@ def _make_leaf(leaf_id: str, url: str) -> _DemoLeafRecord:
 class _MockSource:
     """Satisfies Source protocol by structure."""
 
-    def discover(self, client: HttpClient) -> Sequence[Ref]:
+    def discover(self, client: SyncHttpClientProtocol) -> Sequence[Ref]:
         return [Ref(url="https://demo.example.com/top/1")]
 
 
@@ -79,14 +80,16 @@ class _MockExpander:
     def __init__(self, child_refs: list[Ref]) -> None:
         self._child_refs = child_refs
 
-    def expand(self, ref: object, client: HttpClient) -> Expansion:
+    def expand(self, ref: object, client: SyncHttpClientProtocol) -> Expansion:
         return Expansion(record=_make_record(), child_refs=self._child_refs)
 
 
 class _MockSink:
     """Returns a leaf record for each ref without network calls."""
 
-    def consume(self, ref: object, client: HttpClient) -> _DemoLeafRecord:
+    def consume(
+        self, ref: object, client: SyncHttpClientProtocol
+    ) -> _DemoLeafRecord:
         r = ref if isinstance(ref, Ref) else Ref(url=str(ref))
         return _make_leaf(leaf_id=r.url.split("/")[-1], url=r.url)
 
@@ -96,12 +99,20 @@ class _MockPlugin:
 
     def __init__(self, child_refs: list[Ref]) -> None:
         self.source = _MockSource()
-        self.expanders: list[object] = [_MockExpander(child_refs)]
-        self.sink: object = _MockSink()
+        self.expanders: Sequence[Expander] = (_MockExpander(child_refs),)
+        self.sink: Sink = _MockSink()
 
     @property
     def name(self) -> str:
         return "mock_plugin"
+
+
+# Static counterparts to the runtime checks below. These assignments ensure
+# the test doubles satisfy the complete widened signatures under Pyright.
+_typed_source: Source = _MockSource()
+_typed_expander: Expander = _MockExpander([])
+_typed_sink: Sink = _MockSink()
+_typed_plugin: CrawlPlugin = _MockPlugin([])
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +297,9 @@ class TestRunnerErrors:
         child_refs: list[Ref],
     ) -> None:
         class _NotReadyExpander:
-            def expand(self, ref: object, client: HttpClient) -> Expansion:
+            def expand(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> Expansion:
                 raise ExpansionNotReadyError("not ready yet")
 
         p = _MockPlugin(child_refs)
@@ -302,7 +315,9 @@ class TestRunnerErrors:
         child_refs: list[Ref],
     ) -> None:
         class _PartialExpander:
-            def expand(self, ref: object, client: HttpClient) -> Expansion:
+            def expand(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> Expansion:
                 raise PartialExpansionError("partial")
 
         p = _MockPlugin(child_refs)
@@ -318,7 +333,9 @@ class TestRunnerErrors:
         child_refs: list[Ref],
     ) -> None:
         class _BrokenExpander:
-            def expand(self, ref: object, client: HttpClient) -> Expansion:
+            def expand(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> Expansion:
                 raise ChildListUnavailableError("API down")
 
         p = _MockPlugin(child_refs)
@@ -339,7 +356,7 @@ class TestRunnerErrors:
 
         class _FailingSink:
             def consume(
-                self, ref: object, client: HttpClient
+                self, ref: object, client: SyncHttpClientProtocol
             ) -> _DemoLeafRecord:
                 r = ref if isinstance(ref, Ref) else Ref(url="")
                 if r.url.endswith("/1"):
@@ -366,7 +383,7 @@ class TestRunnerErrors:
     ) -> None:
         class _AlwaysFailSink:
             def consume(
-                self, ref: object, client: HttpClient
+                self, ref: object, client: SyncHttpClientProtocol
             ) -> _DemoLeafRecord:
                 raise LeafUnavailableError("always fails")
 
@@ -391,7 +408,7 @@ class TestRunnerErrors:
 
         class _MixedSink:
             def consume(
-                self, ref: object, client: HttpClient
+                self, ref: object, client: SyncHttpClientProtocol
             ) -> _DemoLeafRecord:
                 r = ref if isinstance(ref, Ref) else Ref(url="")
                 if r.url.endswith("/2"):
@@ -478,7 +495,7 @@ class TestRunnerErrors:
         # Scenario B: all consume() fail
         class _AlwaysFailSink:
             def consume(
-                self, ref: object, client: HttpClient
+                self, ref: object, client: SyncHttpClientProtocol
             ) -> _DemoLeafRecord:
                 raise LeafUnavailableError("always fails")
 
@@ -572,7 +589,9 @@ class TestRunnerLogging:
         refs = [Ref(url="https://demo.example.com/leaf/1")]
 
         class _FailSink:
-            def consume(self, ref: object, client: HttpClient) -> object:
+            def consume(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> object:
                 raise LeafUnavailableError("gone")
 
         p = _MockPlugin(refs)
@@ -608,12 +627,16 @@ class TestRunnerLogging:
                 return "X" * 200
 
         class _LargeParentExpander:
-            def expand(self, ref: object, client: HttpClient) -> Expansion:
+            def expand(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> Expansion:
                 leaf = Ref(url="https://demo.example.com/leaf/1")
                 return Expansion(record=_LargeRecord(), child_refs=[leaf])
 
         class _FailSink:
-            def consume(self, ref: object, client: HttpClient) -> object:
+            def consume(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> object:
                 raise LeafUnavailableError("gone")
 
         p = _MockPlugin([])
@@ -643,11 +666,15 @@ class TestRunnerLogging:
         section_a = Ref(url="https://demo.example.com/section/a")
 
         class _FirstExpander:
-            def expand(self, ref: object, client: HttpClient) -> Expansion:
+            def expand(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> Expansion:
                 return Expansion(record=_make_record(), child_refs=[section_a])
 
         class _FailingExpander:
-            def expand(self, ref: object, client: HttpClient) -> Expansion:
+            def expand(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> Expansion:
                 raise ChildListUnavailableError("API down")
 
         p = _MockPlugin([])
@@ -725,14 +752,18 @@ class TestMultiExpander:
             name: str
 
         class _CatalogExpander:
-            def expand(self, ref: object, client: HttpClient) -> Expansion:
+            def expand(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> Expansion:
                 return Expansion(
                     record=_CatalogRecord(),
                     child_refs=[section_a, section_b],
                 )
 
         class _SectionExpander:
-            def expand(self, ref: object, client: HttpClient) -> Expansion:
+            def expand(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> Expansion:
                 r = ref if isinstance(ref, Ref) else Ref(url="")
                 if r.url.endswith("/a"):
                     return Expansion(
@@ -813,14 +844,18 @@ class TestMultiExpander:
         """
 
         class _FirstExpander:
-            def expand(self, ref: object, client: HttpClient) -> Expansion:
+            def expand(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> Expansion:
                 return Expansion(
                     record=_make_record(),
                     child_refs=[Ref(url="https://demo.example.com/section/a")],
                 )
 
         class _NotReadySecondExpander:
-            def expand(self, ref: object, client: HttpClient) -> Expansion:
+            def expand(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> Expansion:
                 raise ExpansionNotReadyError("section not live yet")
 
         p = _MockPlugin([])
@@ -844,14 +879,18 @@ class TestMultiExpander:
         item_1 = Ref(url="https://demo.example.com/item/1")
 
         class _FirstExpander:
-            def expand(self, ref: object, client: HttpClient) -> Expansion:
+            def expand(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> Expansion:
                 return Expansion(
                     record=_make_record(),
                     child_refs=[section_a, section_b],
                 )
 
         class _SectionExpander:
-            def expand(self, ref: object, client: HttpClient) -> Expansion:
+            def expand(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> Expansion:
                 r = ref if isinstance(ref, Ref) else Ref(url="")
                 if r.url.endswith("/a"):
                     raise PartialExpansionError("section_a unavailable")
@@ -882,14 +921,18 @@ class TestMultiExpander:
         item_1 = Ref(url="https://demo.example.com/item/1")
 
         class _FirstExpander:
-            def expand(self, ref: object, client: HttpClient) -> Expansion:
+            def expand(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> Expansion:
                 return Expansion(
                     record=_make_record(),
                     child_refs=[section_a, section_b],
                 )
 
         class _SectionExpander:
-            def expand(self, ref: object, client: HttpClient) -> Expansion:
+            def expand(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> Expansion:
                 r = ref if isinstance(ref, Ref) else Ref(url="")
                 if r.url.endswith("/b"):
                     raise ChildListUnavailableError("API down")
@@ -915,14 +958,18 @@ class TestMultiExpander:
         section_b = Ref(url="https://demo.example.com/section/b")
 
         class _FirstExpander:
-            def expand(self, ref: object, client: HttpClient) -> Expansion:
+            def expand(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> Expansion:
                 return Expansion(
                     record=_make_record(),
                     child_refs=[section_a, section_b],
                 )
 
         class _AlwaysFailExpander:
-            def expand(self, ref: object, client: HttpClient) -> Expansion:
+            def expand(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> Expansion:
                 raise ChildListUnavailableError("API down")
 
         p = _MockPlugin([])
@@ -940,7 +987,9 @@ class TestMultiExpander:
         config: RunConfig,
     ) -> None:
         class _EmptyExpander:
-            def expand(self, ref: object, client: HttpClient) -> Expansion:
+            def expand(
+                self, ref: object, client: SyncHttpClientProtocol
+            ) -> Expansion:
                 return Expansion(record=_make_record(), child_refs=[])
 
         p = _MockPlugin([])

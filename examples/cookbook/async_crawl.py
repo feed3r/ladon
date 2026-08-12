@@ -12,6 +12,7 @@ from typing import cast
 from ladon import (
     AsyncCrawlPlugin,
     AsyncHttpClient,
+    AsyncHttpClientProtocol,
     Expansion,
     HttpClientConfig,
     LeafUnavailableError,
@@ -55,7 +56,9 @@ def build_mock_server() -> tuple[ThreadingHTTPServer, Thread]:
 
 
 class ListingExpander:
-    async def expand(self, ref: Ref, client: AsyncHttpClient) -> Expansion:
+    async def expand(
+        self, ref: Ref, client: AsyncHttpClientProtocol
+    ) -> Expansion:
         response = await client.get(ref.url)
         if not response.ok or response.value is None:
             raise LeafUnavailableError(f"listing failed: {response.error}")
@@ -68,7 +71,7 @@ class ListingExpander:
 
 class ItemSink:
     async def consume(
-        self, ref: Ref, client: AsyncHttpClient
+        self, ref: Ref, client: AsyncHttpClientProtocol
     ) -> dict[str, object]:
         response = await client.get(ref.url)
         if not response.ok or response.value is None:
@@ -77,7 +80,7 @@ class ItemSink:
 
 
 class LocalSource:
-    async def discover(self, client: AsyncHttpClient) -> Sequence[Ref]:
+    async def discover(self, client: AsyncHttpClientProtocol) -> Sequence[Ref]:
         return ()
 
 

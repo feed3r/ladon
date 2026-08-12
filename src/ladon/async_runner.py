@@ -36,7 +36,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import cast
 
-from ladon.networking.async_client import AsyncHttpClient
+from ladon.networking.protocols import AsyncHttpClientProtocol
 from ladon.plugins.async_protocol import AsyncCrawlPlugin
 from ladon.plugins.errors import (
     ChildListUnavailableError,
@@ -85,7 +85,7 @@ def _raise_first_fatal_outcome(
 async def async_run_crawl(
     top_ref: object,
     plugin: AsyncCrawlPlugin,
-    client: AsyncHttpClient,
+    client: AsyncHttpClientProtocol,
     config: RunConfig,
     on_leaf: Callable[[object, object], Awaitable[None]] | None = None,
 ) -> RunResult:
@@ -94,7 +94,7 @@ async def async_run_crawl(
     Args:
         top_ref:  Reference to the resource to expand.
         plugin:   Async crawl plugin providing expanders and sink.
-        client:   Configured AsyncHttpClient instance.
+        client:   Configured asynchronous HTTP client protocol implementation.
         config:   Run-level configuration (limits, concurrency).
         on_leaf:  Optional async callback invoked after each successful leaf
                   consume. Receives (leaf_record, parent_record).
@@ -283,7 +283,7 @@ async def async_run_crawl(
 
 async def async_run_plugin(
     plugin: AsyncCrawlPlugin,
-    client: AsyncHttpClient,
+    client: AsyncHttpClientProtocol,
     config: RunConfig,
     on_leaf: Callable[[object, object], Awaitable[None]] | None = None,
 ) -> PluginRunResult:
@@ -328,7 +328,7 @@ async def async_run_plugin(
 async def plan_crawl(
     top_ref: object,
     plugin: AsyncCrawlPlugin,
-    client: AsyncHttpClient,
+    client: AsyncHttpClientProtocol,
 ) -> CrawlPlan:
     """Run Phase 1 (tree traversal) asynchronously and return a CrawlPlan.
 
@@ -398,7 +398,7 @@ async def plan_crawl(
 async def execute_plan(
     plan: CrawlPlan,
     plugin: AsyncCrawlPlugin,
-    client: AsyncHttpClient,
+    client: AsyncHttpClientProtocol,
     config: RunConfig,
     on_leaf: Callable[[object, object], Awaitable[None]] | None = None,
     on_progress: Callable[[int, int], None] | None = None,
@@ -408,7 +408,7 @@ async def execute_plan(
     Args:
         plan:        Plan produced by ``plan_crawl()``.
         plugin:      Async crawl plugin whose sink consumes each leaf.
-        client:      Configured AsyncHttpClient instance.
+        client:      Configured asynchronous HTTP client protocol implementation.
         config:      Run-level configuration (leaf_limit, async_concurrency).
                      If the plan was already narrowed with ``CrawlPlan.limited_to()``,
                      both that cap and ``config.leaf_limit`` apply independently —

@@ -9,7 +9,7 @@ from typing import cast
 
 import pytest
 
-from ladon.networking.client import HttpClient
+from ladon.networking.protocols import SyncHttpClientProtocol
 from ladon.plugins.errors import ExpansionNotReadyError, LeafUnavailableError
 from ladon.plugins.models import Expansion, Ref
 from ladon.plugins.protocol import CrawlPlugin, Expander, Sink, Source
@@ -26,7 +26,7 @@ class _Source:
         self._refs = refs
         self.calls = 0
 
-    def discover(self, client: HttpClient) -> Sequence[Ref]:
+    def discover(self, client: SyncHttpClientProtocol) -> Sequence[Ref]:
         self.calls += 1
         return self._refs
 
@@ -40,7 +40,7 @@ class _Expander:
         self._error = error
         self._error_for = error_for
 
-    def expand(self, ref: object, client: HttpClient) -> Expansion:
+    def expand(self, ref: object, client: SyncHttpClientProtocol) -> Expansion:
         if self._error is not None:
             raise self._error
         assert isinstance(ref, Ref)
@@ -58,7 +58,7 @@ class _Sink:
     def __init__(self, fail: Callable[[Ref], bool] | None = None) -> None:
         self._fail: Callable[[Ref], bool] = fail or _never_fail
 
-    def consume(self, ref: object, client: HttpClient) -> _Record:
+    def consume(self, ref: object, client: SyncHttpClientProtocol) -> _Record:
         assert isinstance(ref, Ref)
         if self._fail(ref):
             raise LeafUnavailableError("unavailable")
@@ -103,7 +103,9 @@ def test_runs_every_discovered_root_and_aggregates_results() -> None:
     plugin = _Plugin(_refs())
 
     result = run_plugin(
-        cast(CrawlPlugin, plugin), cast(HttpClient, None), RunConfig()
+        cast(CrawlPlugin, plugin),
+        cast(SyncHttpClientProtocol, None),
+        RunConfig(),
     )
 
     assert isinstance(result, PluginRunResult)
@@ -121,7 +123,9 @@ def test_empty_discovery_returns_zero_count_aggregate() -> None:
     plugin = _Plugin(())
 
     result = run_plugin(
-        cast(CrawlPlugin, plugin), cast(HttpClient, None), RunConfig()
+        cast(CrawlPlugin, plugin),
+        cast(SyncHttpClientProtocol, None),
+        RunConfig(),
     )
 
     assert isinstance(plugin.source, _Source)
@@ -145,7 +149,7 @@ def test_forwards_on_leaf_to_each_single_root_run() -> None:
 
     result = run_plugin(
         cast(CrawlPlugin, plugin),
-        cast(HttpClient, None),
+        cast(SyncHttpClientProtocol, None),
         RunConfig(),
         on_leaf=on_leaf,
     )
@@ -157,7 +161,7 @@ def test_forwards_on_leaf_to_each_single_root_run() -> None:
 def test_applies_leaf_limit_to_each_discovered_root() -> None:
     result = run_plugin(
         cast(CrawlPlugin, _Plugin(_refs())),
-        cast(HttpClient, None),
+        cast(SyncHttpClientProtocol, None),
         RunConfig(leaf_limit=1),
     )
 
@@ -171,7 +175,9 @@ def test_aggregates_leaf_errors_with_root_index() -> None:
     )
 
     result = run_plugin(
-        cast(CrawlPlugin, plugin), cast(HttpClient, None), RunConfig()
+        cast(CrawlPlugin, plugin),
+        cast(SyncHttpClientProtocol, None),
+        RunConfig(),
     )
 
     assert result.leaves_consumed == 3
@@ -183,7 +189,7 @@ def test_aggregates_leaf_errors_with_root_index() -> None:
 
 def test_discovery_errors_propagate() -> None:
     class _FailingSource(_Source):
-        def discover(self, client: HttpClient) -> Sequence[Ref]:
+        def discover(self, client: SyncHttpClientProtocol) -> Sequence[Ref]:
             raise RuntimeError("discovery failed")
 
     plugin = _Plugin(_refs())
@@ -191,7 +197,9 @@ def test_discovery_errors_propagate() -> None:
 
     with pytest.raises(RuntimeError, match="discovery failed"):
         run_plugin(
-            cast(CrawlPlugin, plugin), cast(HttpClient, None), RunConfig()
+            cast(CrawlPlugin, plugin),
+            cast(SyncHttpClientProtocol, None),
+            RunConfig(),
         )
 
 
@@ -202,7 +210,9 @@ def test_globally_fatal_root_errors_propagate() -> None:
 
     with pytest.raises(ExpansionNotReadyError, match="later"):
         run_plugin(
-            cast(CrawlPlugin, plugin), cast(HttpClient, None), RunConfig()
+            cast(CrawlPlugin, plugin),
+            cast(SyncHttpClientProtocol, None),
+            RunConfig(),
         )
 
 
@@ -226,7 +236,7 @@ def test_later_fatal_root_preserves_earlier_callback_side_effects() -> None:
     with pytest.raises(ExpansionNotReadyError, match="later"):
         run_plugin(
             cast(CrawlPlugin, plugin),
-            cast(HttpClient, None),
+            cast(SyncHttpClientProtocol, None),
             RunConfig(),
             on_leaf=on_leaf,
         )
