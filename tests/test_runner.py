@@ -89,6 +89,42 @@ class _MockPlugin:
 _typed_plugin: CrawlPlugin = _MockPlugin([])
 
 
+class _PreciseSource:
+    def discover(
+        self, client: SyncHttpClientProtocol
+    ) -> Sequence[Ref[dict[str, str]]]:
+        return (Ref("https://typed.example/top", {"kind": "top"}),)
+
+
+class _PreciseExpander:
+    def expand(
+        self,
+        ref: Ref[dict[str, str]],
+        client: SyncHttpClientProtocol,
+    ) -> Expansion[_DemoRecord, dict[str, int]]:
+        return Expansion(
+            _DemoRecord(),
+            (Ref(f"{ref.url}/leaf", {"leaf_id": 7}),),
+        )
+
+
+class _PreciseSink:
+    def consume(
+        self,
+        ref: Ref[dict[str, int]],
+        client: SyncHttpClientProtocol,
+    ) -> _DemoLeafRecord:
+        return _DemoLeafRecord(str(ref.raw["leaf_id"]), ref.url)
+
+
+@dataclass(frozen=True)
+class _PrecisePlugin:
+    name: str = "precise_plugin"
+    source: _PreciseSource = _PreciseSource()
+    expanders: Sequence[_PreciseExpander] = (_PreciseExpander(),)
+    sink: _PreciseSink = _PreciseSink()
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -111,6 +147,24 @@ def plugin(child_refs: list[Ref]) -> _MockPlugin:
 @pytest.fixture()
 def top_ref() -> Ref:
     return Ref(url="https://demo.example.com/top/1")
+
+
+@pytest.fixture()
+def two_level_plugin() -> _MockPlugin:
+    section = Ref(url="https://demo.example.com/section/1")
+    leaf = Ref(url="https://demo.example.com/leaf/1")
+
+    class _RootExpander:
+        def expand(self, ref: object, client: object) -> Expansion:
+            return Expansion(_DemoRecord("root"), (section,))
+
+    class _SectionExpander:
+        def expand(self, ref: object, client: object) -> Expansion:
+            return Expansion(_DemoRecord("direct-parent"), (leaf,))
+
+    plugin = _MockPlugin([])
+    plugin.expanders = (_RootExpander(), _SectionExpander())
+    return plugin
 
 
 class _UnexpectedFailureSink:
@@ -149,6 +203,15 @@ class TestRunCrawlExceptionSemantics:
         assert RunResult.__doc__ is not None
         assert '"ref[N] consume failed: ..."' in RunResult.__doc__
         assert '"ref[N] callback failed: ..."' in RunResult.__doc__
+
+    def test_shared_result_and_config_docs_name_both_callback_contracts(
+        self,
+    ) -> None:
+        assert RunConfig.__doc__ is not None
+        assert RunResult.__doc__ is not None
+        for callback_name in ("``on_leaf``", "``on_planned_leaf``"):
+            assert callback_name in RunConfig.__doc__
+            assert callback_name in RunResult.__doc__
 
     def test_run_crawl_documents_fatal_exceptions(self) -> None:
         assert run_crawl.__doc__ is not None
@@ -482,6 +545,31 @@ class TestPlanCrawlSync:
 
 
 class TestExecutePlanSync:
+    def test_precise_plan_leaf_type_flows_to_callback(self) -> None:
+        plugin = _PrecisePlugin()
+        plan = plan_crawl_sync(
+            Ref("https://typed.example/top", {"kind": "top"}),
+            plugin,
+            None,  # type: ignore[arg-type]
+        )
+        leaf_ref: Ref[dict[str, int]] = plan.leaves[0]
+        seen: list[tuple[_DemoLeafRecord, Ref[dict[str, int]]]] = []
+
+        def on_planned_leaf(
+            record: _DemoLeafRecord, ref: Ref[dict[str, int]]
+        ) -> None:
+            seen.append((record, ref))
+
+        execute_plan_sync(
+            plan,
+            plugin,
+            None,  # type: ignore[arg-type]
+            RunConfig(),
+            on_planned_leaf=on_planned_leaf,
+        )
+        assert leaf_ref.raw["leaf_id"] == 7
+        assert seen == [(_DemoLeafRecord("7", leaf_ref.url), leaf_ref)]
+
     def test_returns_run_result(
         self, top_ref: Ref, plugin: _MockPlugin
     ) -> None:
@@ -497,6 +585,25 @@ class TestExecutePlanSync:
         assert result.leaves_consumed == 3
         assert result.leaves_persisted == 3
         assert result.leaves_failed == 0
+
+    def test_run_crawl_uses_direct_parent_from_second_expander(
+        self, top_ref: Ref, two_level_plugin: _MockPlugin
+    ) -> None:
+        parents: list[object] = []
+
+        # ParentT is deliberately object because ADR-015 erases chain interiors.
+        def on_leaf(record: _DemoLeafRecord, parent: object) -> None:
+            parents.append(parent)
+
+        result = run_crawl(
+            top_ref,
+            two_level_plugin,
+            None,  # type: ignore[arg-type]
+            RunConfig(),
+            on_leaf=on_leaf,
+        )
+        assert result.leaves_consumed == 1
+        assert parents == [_DemoRecord("direct-parent")]
 
     def test_record_carried_from_plan(
         self, top_ref: Ref, plugin: _MockPlugin
@@ -514,7 +621,13 @@ class TestExecutePlanSync:
         def on_leaf(record: object, ref: object) -> None:
             calls.append((record, ref))
 
-        execute_plan_sync(plan, plugin, None, RunConfig(), on_leaf=on_leaf)  # type: ignore[arg-type]
+        execute_plan_sync(
+            plan,
+            plugin,
+            None,  # type: ignore[arg-type]
+            RunConfig(),
+            on_planned_leaf=on_leaf,
+        )
         assert len(calls) == 3
         # Second arg must be the leaf ref (a Ref), not a parent record
         for _, ref in calls:
@@ -532,7 +645,13 @@ class TestExecutePlanSync:
         p.sink = _FailingSink()
         plan = plan_crawl_sync(top_ref, p, None)  # type: ignore[arg-type]
         calls: list[object] = []
-        execute_plan_sync(plan, p, None, RunConfig(), on_leaf=lambda r, ref: calls.append(r))  # type: ignore[arg-type]
+        execute_plan_sync(
+            plan,
+            p,
+            None,  # type: ignore[arg-type]
+            RunConfig(),
+            on_planned_leaf=lambda r, ref: calls.append(r),
+        )
         assert len(calls) == 0
 
     def test_leaf_unavailable_counted_as_failed(self, top_ref: Ref) -> None:
@@ -691,7 +810,13 @@ class TestExecutePlanSync:
         def bad_callback(record: object, ref: object) -> None:
             raise RuntimeError("db exploded")
 
-        result = execute_plan_sync(plan, plugin, None, RunConfig(), on_leaf=bad_callback)  # type: ignore[arg-type]
+        result = execute_plan_sync(
+            plan,
+            plugin,
+            None,  # type: ignore[arg-type]
+            RunConfig(),
+            on_planned_leaf=bad_callback,
+        )
         assert result.leaves_consumed == 3
         assert result.leaves_persisted == 0
         assert result.leaves_failed == 0
@@ -807,7 +932,7 @@ class TestExecutePlanSync:
             p,
             None,  # type: ignore[arg-type]
             RunConfig(),
-            on_leaf=failing_callback,
+            on_planned_leaf=failing_callback,
             on_progress=lambda d, t: progress_calls.append((d, t)),
         )
         assert progress_calls == [(1, 1)]
@@ -832,7 +957,7 @@ class TestExecutePlanSync:
                 plugin,
                 None,  # type: ignore[arg-type]
                 RunConfig(),
-                on_leaf=cancelled_callback,
+                on_planned_leaf=cancelled_callback,
                 on_progress=lambda done, total: progress_calls.append(
                     (done, total)
                 ),
@@ -843,7 +968,7 @@ class TestExecutePlanSync:
         assert caplog.records[0].error_type == "KeyboardInterrupt"  # type: ignore[attr-defined]
         assert "failed" not in caplog.records[0].getMessage()
         assert execute_plan_sync.__doc__ is not None
-        assert "Sink or ``on_leaf``" in execute_plan_sync.__doc__
+        assert "Sink or ``on_planned_leaf``" in execute_plan_sync.__doc__
 
     def test_on_progress_exception_is_swallowed(
         self, top_ref: Ref, plugin: _MockPlugin

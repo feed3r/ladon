@@ -10,7 +10,6 @@ from threading import Thread
 from typing import cast
 
 from ladon import (
-    AsyncCrawlPlugin,
     AsyncHttpClient,
     AsyncHttpClientProtocol,
     Expansion,
@@ -95,15 +94,17 @@ class AsyncCatalogPlugin:
 async def crawl_one(base_url: str) -> RunResult:
     persisted: list[dict[str, object]] = []
 
-    async def persist(leaf_record: object, parent_record: object) -> None:
+    async def persist(
+        leaf_record: dict[str, object], parent_record: object
+    ) -> None:
         del parent_record
-        persisted.append(cast(dict[str, object], leaf_record))
+        persisted.append(leaf_record)
 
     config = HttpClientConfig(user_agent="my-async-crawler/1.0", retries=0)
     async with AsyncHttpClient(config) as client:
         result = await async_run_crawl(
             top_ref=Ref(f"{base_url}/listing"),
-            plugin=cast("AsyncCrawlPlugin", AsyncCatalogPlugin()),
+            plugin=AsyncCatalogPlugin(),
             client=client,
             config=RunConfig(leaf_limit=500, async_concurrency=20),
             on_leaf=persist,

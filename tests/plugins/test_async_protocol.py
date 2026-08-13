@@ -7,7 +7,9 @@ All isinstance checks are synchronous — pytest-asyncio is not required.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
+from ladon.networking.protocols import AsyncHttpClientProtocol
 from ladon.plugins.async_protocol import (
     AsyncCrawlPlugin,
     AsyncExpander,
@@ -52,6 +54,60 @@ class _MockAsyncPlugin:
     @property
     def sink(self) -> _MockAsyncSink:
         return _MockAsyncSink()
+
+
+@dataclass(frozen=True)
+class _TypedAsyncRecord:
+    value: int
+
+
+class _TypedAsyncSource:
+    async def discover(
+        self, client: AsyncHttpClientProtocol
+    ) -> Sequence[Ref[dict[str, str]]]:
+        return (Ref("https://typed.example/top", {"kind": "top"}),)
+
+
+class _TypedAsyncExpander:
+    async def expand(
+        self,
+        ref: Ref[dict[str, str]],
+        client: AsyncHttpClientProtocol,
+    ) -> Expansion[_TypedAsyncRecord, dict[str, int]]:
+        return Expansion(
+            _TypedAsyncRecord(0),
+            (Ref(f"{ref.url}/leaf", {"leaf_id": 1}),),
+        )
+
+
+class _TypedAsyncSink:
+    async def consume(
+        self,
+        ref: Ref[dict[str, int]],
+        client: AsyncHttpClientProtocol,
+    ) -> _TypedAsyncRecord:
+        return _TypedAsyncRecord(ref.raw["leaf_id"])
+
+
+@dataclass(frozen=True)
+class _TypedAsyncPlugin:
+    name: str = "typed_async_plugin"
+    source: _TypedAsyncSource = _TypedAsyncSource()
+    expanders: Sequence[_TypedAsyncExpander] = (_TypedAsyncExpander(),)
+    sink: _TypedAsyncSink = _TypedAsyncSink()
+
+
+# These assignments are static conformance checks with no boundary casts.
+_concrete_async_source: AsyncSource[Ref[dict[str, str]]] = _TypedAsyncSource()
+_concrete_async_expander: AsyncExpander[
+    Ref[dict[str, str]], _TypedAsyncRecord, dict[str, int]
+] = _TypedAsyncExpander()
+_concrete_async_sink: AsyncSink[Ref[dict[str, int]], _TypedAsyncRecord] = (
+    _TypedAsyncSink()
+)
+_concrete_async_plugin: AsyncCrawlPlugin[
+    Ref[dict[str, str]], Ref[dict[str, int]], _TypedAsyncRecord
+] = _TypedAsyncPlugin()
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +217,9 @@ class TestAsyncCrawlPluginProtocol:
     def test_sink_property_type(self) -> None:
         plugin = _MockAsyncPlugin()
         assert isinstance(plugin.sink, AsyncSink)
+
+    def test_concretely_typed_plugin_satisfied(self) -> None:
+        assert isinstance(_TypedAsyncPlugin(), AsyncCrawlPlugin)
 
 
 # ---------------------------------------------------------------------------

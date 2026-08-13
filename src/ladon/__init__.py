@@ -3,6 +3,8 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from .async_runner import (
+    AsyncOnLeafCallback,
+    AsyncOnPlannedLeafCallback,
     async_run_crawl,
     async_run_plugin,
     execute_plan,
@@ -52,6 +54,8 @@ from .plugins import (
 )
 from .runner import (
     CrawlPlan,
+    OnLeafCallback,
+    OnPlannedLeafCallback,
     PluginRunResult,
     RunConfig,
     RunResult,
@@ -87,11 +91,15 @@ __all__ = [
     "RunResult",
     "PluginRunResult",
     "CrawlPlan",
+    "OnLeafCallback",
+    "OnPlannedLeafCallback",
     # Runner — async
     "async_run_crawl",
     "async_run_plugin",
     "plan_crawl",
     "execute_plan",
+    "AsyncOnLeafCallback",
+    "AsyncOnPlannedLeafCallback",
     # Sync plugin protocols
     "CrawlPlugin",
     "Source",

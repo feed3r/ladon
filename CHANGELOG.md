@@ -11,6 +11,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Generic SES protocol types** — `Ref[RawT]`,
+  `Expansion[RecordT, ChildRawT]`, `Source`, `Expander`, `Sink`,
+  `CrawlPlugin`, and `CrawlPlan` now preserve concrete adapter types under
+  strict type checking. New `OnLeafCallback` / `OnPlannedLeafCallback` type
+  aliases and async equivalents let adapter authors annotate callbacks
+  precisely.
 - **`SyncHttpClientProtocol` / `AsyncHttpClientProtocol`** — public structural
   HTTP client contracts implemented by both native and curl-cffi backends.
 - **`run_plugin()` / `async_run_plugin()`** — source-driven whole-plugin
@@ -43,6 +49,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rate-limit slots instead of waking in a batch, and HALF_OPEN circuit
   breakers admit exactly one probe. Both guards are cancellation-safe and
   remain independent across hosts.
+
+### Changed
+
+- **Breaking: planned-crawl callback keyword renamed** —
+  `execute_plan_sync(..., on_leaf=...)` and `execute_plan(..., on_leaf=...)`
+  must now use `on_planned_leaf=`, making their `(leaf_record, leaf_ref)`
+  contract distinct from the runners' `(leaf_record, parent_record)` callback.
 
 ---
 

@@ -12,34 +12,68 @@ The three-layer pipeline is:
 
     Source  →  [Expander, ...]  →  Sink
 
-``Source`` produces top-level refs. Each ``Expander`` takes a ref and
-returns an ``Expansion`` (record + child refs). ``Sink`` takes a leaf
-ref and returns a final record. ``CrawlPlugin`` bundles all three.
+``Source[RefT]`` produces top-level refs. Each
+``Expander[RefT, RecordT, ChildRawT]`` takes a ref and returns an
+``Expansion`` (record + child refs). ``Sink[RefT, RecordT]`` takes a leaf
+ref and returns a final record. ``CrawlPlugin[TopRefT, LeafRefT,
+LeafRecordT]`` bundles all three.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol, runtime_checkable
+from typing import runtime_checkable
+
+from typing_extensions import Any, Protocol, TypeVar
 
 from ..networking.protocols import SyncHttpClientProtocol
 from .models import Expansion
 
+SourceRefT_co = TypeVar("SourceRefT_co", covariant=True, default=object)
+ExpanderRefT_contra = TypeVar(
+    "ExpanderRefT_contra", contravariant=True, default=object
+)
+ExpanderRecordT_co = TypeVar(
+    "ExpanderRecordT_co", covariant=True, default=object
+)
+ExpanderChildRawT_co = TypeVar(
+    "ExpanderChildRawT_co", covariant=True, default=object
+)
+SinkRefT_contra = TypeVar("SinkRefT_contra", contravariant=True, default=object)
+SinkRecordT_co = TypeVar("SinkRecordT_co", covariant=True, default=object)
+PluginTopRefT_co = TypeVar("PluginTopRefT_co", covariant=True, default=object)
+PluginLeafRefT_contra = TypeVar(
+    "PluginLeafRefT_contra", contravariant=True, default=object
+)
+PluginLeafRecordT_co = TypeVar(
+    "PluginLeafRecordT_co", covariant=True, default=object
+)
+
 
 @runtime_checkable
-class Source(Protocol):
+class Source(Protocol[SourceRefT_co]):
     """Discover top-level refs from an external source."""
 
-    def discover(self, client: SyncHttpClientProtocol) -> Sequence[object]:
+    def discover(
+        self, client: SyncHttpClientProtocol
+    ) -> Sequence[SourceRefT_co]:
         """Return all discoverable top-level references."""
         ...
 
 
 @runtime_checkable
-class Expander(Protocol):
+class Expander(
+    Protocol[
+        ExpanderRefT_contra,
+        ExpanderRecordT_co,
+        ExpanderChildRawT_co,
+    ]
+):
     """Expand one ref into a record plus child refs."""
 
-    def expand(self, ref: object, client: SyncHttpClientProtocol) -> Expansion:
+    def expand(
+        self, ref: ExpanderRefT_contra, client: SyncHttpClientProtocol
+    ) -> Expansion[ExpanderRecordT_co, ExpanderChildRawT_co]:
         """Fetch ref, return its record and the child refs to process next.
 
         Raises:
@@ -51,10 +85,12 @@ class Expander(Protocol):
 
 
 @runtime_checkable
-class Sink(Protocol):
+class Sink(Protocol[SinkRefT_contra, SinkRecordT_co]):
     """Consume a leaf ref and return its final record."""
 
-    def consume(self, ref: object, client: SyncHttpClientProtocol) -> object:
+    def consume(
+        self, ref: SinkRefT_contra, client: SyncHttpClientProtocol
+    ) -> SinkRecordT_co:
         """Fetch and parse one leaf ref, returning a complete record.
 
         Context for the leaf (e.g. parent data) flows through
@@ -67,7 +103,13 @@ class Sink(Protocol):
 
 
 @runtime_checkable
-class CrawlPlugin(Protocol):
+class CrawlPlugin(
+    Protocol[
+        PluginTopRefT_co,
+        PluginLeafRefT_contra,
+        PluginLeafRecordT_co,
+    ]
+):
     """Bundle of all adapters for one crawl domain.
 
     ``name`` is a short identifier used in log lines and error messages
@@ -75,6 +117,9 @@ class CrawlPlugin(Protocol):
     top-level refs. ``expanders`` is an ordered list of expansion steps
     (one per tree level above the leaves). ``sink`` consumes the leaf
     refs produced by the last expander.
+
+    The heterogeneous chain interior deliberately uses ``Any`` because a
+    single homogeneous sequence cannot express per-stage types; see ADR-015.
 
     CLI convention
     --------------
@@ -89,10 +134,10 @@ class CrawlPlugin(Protocol):
     def name(self) -> str: ...
 
     @property
-    def source(self) -> Source: ...
+    def source(self) -> Source[PluginTopRefT_co]: ...
 
     @property
-    def expanders(self) -> Sequence[Expander]: ...
+    def expanders(self) -> Sequence[Expander[Any, Any, Any]]: ...
 
     @property
-    def sink(self) -> Sink: ...
+    def sink(self) -> Sink[PluginLeafRefT_contra, PluginLeafRecordT_co]: ...

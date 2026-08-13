@@ -4,11 +4,9 @@
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import cast
 
 from ladon import (
     ChildListUnavailableError,
-    CrawlPlugin,
     Expansion,
     HttpClient,
     HttpClientConfig,
@@ -68,7 +66,7 @@ def run_example() -> PluginRunResult:
     with HttpClient(
         HttpClientConfig(user_agent="example-crawler/1.0")
     ) as client:
-        result = run_plugin(cast("CrawlPlugin", plugin), client, RunConfig())
+        result = run_plugin(plugin, client, RunConfig())
         print(result.leaves_consumed, result.errors)
         return result
 

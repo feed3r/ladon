@@ -115,6 +115,58 @@ _typed_sink: Sink = _MockSink()
 _typed_plugin: CrawlPlugin = _MockPlugin([])
 
 
+@dataclass(frozen=True)
+class _TypedRecord:
+    value: int
+
+
+class _TypedSource:
+    def discover(
+        self, client: SyncHttpClientProtocol
+    ) -> Sequence[Ref[dict[str, str]]]:
+        return (Ref("https://typed.example/top", {"kind": "top"}),)
+
+
+class _TypedExpander:
+    def expand(
+        self,
+        ref: Ref[dict[str, str]],
+        client: SyncHttpClientProtocol,
+    ) -> Expansion[_DemoRecord, dict[str, int]]:
+        return Expansion(
+            _make_record(),
+            (Ref(f"{ref.url}/leaf", {"leaf_id": 1}),),
+        )
+
+
+class _TypedSink:
+    def consume(
+        self,
+        ref: Ref[dict[str, int]],
+        client: SyncHttpClientProtocol,
+    ) -> _TypedRecord:
+        return _TypedRecord(ref.raw["leaf_id"])
+
+
+@dataclass(frozen=True)
+class _TypedPlugin:
+    name: str = "typed_plugin"
+    source: _TypedSource = _TypedSource()
+    expanders: Sequence[_TypedExpander] = (_TypedExpander(),)
+    sink: _TypedSink = _TypedSink()
+
+
+# These assignments are static conformance checks with no boundary casts.
+_concrete_source: Source[Ref[dict[str, str]]] = _TypedSource()
+_concrete_expander: Expander[
+    Ref[dict[str, str]], _DemoRecord, dict[str, int]
+] = _TypedExpander()
+_concrete_sink: Sink[Ref[dict[str, int]], _TypedRecord] = _TypedSink()
+_concrete_plugin: CrawlPlugin[
+    Ref[dict[str, str]], Ref[dict[str, int]], _TypedRecord
+] = _TypedPlugin()
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -169,6 +221,9 @@ class TestProtocolStructure:
 
     def test_crawl_plugin_name(self, plugin: _MockPlugin) -> None:
         assert plugin.name == "mock_plugin"
+
+    def test_concretely_typed_plugin_satisfied(self) -> None:
+        assert isinstance(_TypedPlugin(), CrawlPlugin)
 
 
 # ---------------------------------------------------------------------------

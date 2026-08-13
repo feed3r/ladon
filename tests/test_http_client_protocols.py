@@ -51,7 +51,7 @@ class _Source:
 
 class _Expander:
     def expand(self, ref: object, client: SyncHttpClientProtocol) -> Expansion:
-        return Expansion(record=ref, child_refs=("leaf",))
+        return Expansion(record=ref, child_refs=(Ref("leaf"),))
 
 
 class _Sink:
@@ -88,7 +88,7 @@ class _AsyncExpander:
     async def expand(
         self, ref: object, client: AsyncHttpClientProtocol
     ) -> Expansion:
-        return Expansion(record=ref, child_refs=("leaf",))
+        return Expansion(record=ref, child_refs=(Ref("leaf"),))
 
 
 class _AsyncSink:
