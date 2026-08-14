@@ -12,6 +12,7 @@ from .async_protocol import (
     AsyncSink,
     AsyncSource,
 )
+from .combinators import AllOf, AnyOf, Not
 from .errors import (
     AssetDownloadError,
     ChildListUnavailableError,
@@ -44,6 +45,9 @@ __all__ = [
     # Resolution
     "FetchPredicate",
     "MultiSourceSink",
+    "AllOf",
+    "AnyOf",
+    "Not",
     # Errors
     "PluginError",
     "ExpansionNotReadyError",
