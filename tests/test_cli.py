@@ -310,11 +310,11 @@ class TestMainDispatch:
     def test_run_exits_2_on_real_sink_consume_exception(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        from ladon.plugins.models import Expansion
+        from ladon.plugins.models import Expansion, Ref
 
         class _Expander:
             def expand(self, ref: object, client: object) -> Expansion:
-                return Expansion(record=object(), child_refs=("leaf-1",))
+                return Expansion(record=object(), child_refs=(Ref("leaf-1"),))
 
         class _Sink:
             def consume(self, ref: object, client: object) -> object:
@@ -352,11 +352,11 @@ class TestMainDispatch:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         from ladon.plugins.errors import AssetDownloadError
-        from ladon.plugins.models import Expansion
+        from ladon.plugins.models import Expansion, Ref
 
         class _Expander:
             def expand(self, ref: object, client: object) -> Expansion:
-                return Expansion(record=object(), child_refs=("leaf-1",))
+                return Expansion(record=object(), child_refs=(Ref("leaf-1"),))
 
         class _Sink:
             def consume(self, ref: object, client: object) -> object:

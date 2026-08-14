@@ -44,8 +44,9 @@ class _Expander:
         if self._error is not None:
             raise self._error
         assert isinstance(ref, Ref)
+        typed_ref = Ref(ref.url)
         if self._error_for is not None:
-            error = self._error_for(ref)
+            error = self._error_for(typed_ref)
             if error is not None:
                 raise error
         return Expansion(
@@ -60,7 +61,8 @@ class _Sink:
 
     def consume(self, ref: object, client: SyncHttpClientProtocol) -> _Record:
         assert isinstance(ref, Ref)
-        if self._fail(ref):
+        typed_ref = Ref(ref.url)
+        if self._fail(typed_ref):
             raise LeafUnavailableError("unavailable")
         return _Record(ref.url)
 

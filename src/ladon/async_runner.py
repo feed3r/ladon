@@ -12,8 +12,9 @@ The plan/execute split (v0.3):
   ``execute_plan`` runs Phase 3 against an existing plan.
   ``async_run_crawl`` remains a self-contained Phase 1+3 entry point with the
   original ``on_leaf(leaf_record, parent_record)`` contract.
-  ``execute_plan``'s ``on_leaf`` receives ``(leaf_record, leaf_ref)``
-  per ADR-011 — different from ``async_run_crawl``'s contract.
+  ``execute_plan``'s ``on_planned_leaf`` receives
+  ``(leaf_record, leaf_ref)`` per ADR-011 and ADR-015 — different from
+  ``async_run_crawl``'s contract.
 
 ``ExpansionNotReadyError`` retains the same globally-fatal semantics as in
 the sync runner: when any expander raises it, the coroutine raises immediately
@@ -34,7 +35,9 @@ import asyncio
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
-from typing import cast
+from typing import Any, cast
+
+from typing_extensions import TypeVar
 
 from ladon.networking.protocols import AsyncHttpClientProtocol
 from ladon.plugins.async_protocol import AsyncCrawlPlugin
@@ -52,6 +55,18 @@ from ladon.runner import (
     RunResult,
     log_leaf_exception,
 )
+
+AsyncLeafRecordT = TypeVar("AsyncLeafRecordT", default=object)
+AsyncParentT = TypeVar("AsyncParentT", default=object)
+AsyncPlannedLeafRefT = TypeVar("AsyncPlannedLeafRefT", default=object)
+AsyncPlanLeafRefT = TypeVar("AsyncPlanLeafRefT", default=object)
+
+AsyncOnLeafCallback = Callable[
+    [AsyncLeafRecordT, AsyncParentT], Awaitable[None]
+]
+AsyncOnPlannedLeafCallback = Callable[
+    [AsyncLeafRecordT, AsyncPlannedLeafRefT], Awaitable[None]
+]
 
 logger = logging.getLogger(__name__)
 
@@ -84,10 +99,10 @@ def _raise_first_fatal_outcome(
 
 async def async_run_crawl(
     top_ref: object,
-    plugin: AsyncCrawlPlugin,
+    plugin: AsyncCrawlPlugin[Any, Any, AsyncLeafRecordT],
     client: AsyncHttpClientProtocol,
     config: RunConfig,
-    on_leaf: Callable[[object, object], Awaitable[None]] | None = None,
+    on_leaf: AsyncOnLeafCallback[AsyncLeafRecordT, object] | None = None,
 ) -> RunResult:
     """Run a single top-level ref through an async plugin adapter stack.
 
@@ -282,10 +297,10 @@ async def async_run_crawl(
 
 
 async def async_run_plugin(
-    plugin: AsyncCrawlPlugin,
+    plugin: AsyncCrawlPlugin[Any, Any, AsyncLeafRecordT],
     client: AsyncHttpClientProtocol,
     config: RunConfig,
-    on_leaf: Callable[[object, object], Awaitable[None]] | None = None,
+    on_leaf: AsyncOnLeafCallback[AsyncLeafRecordT, object] | None = None,
 ) -> PluginRunResult:
     """Discover and run every top-level ref exposed by an async plugin.
 
@@ -327,9 +342,9 @@ async def async_run_plugin(
 
 async def plan_crawl(
     top_ref: object,
-    plugin: AsyncCrawlPlugin,
+    plugin: AsyncCrawlPlugin[Any, AsyncPlanLeafRefT, Any],
     client: AsyncHttpClientProtocol,
-) -> CrawlPlan:
+) -> CrawlPlan[AsyncPlanLeafRefT]:
     """Run Phase 1 (tree traversal) asynchronously and return a CrawlPlan.
 
     Traverses all expanders in order and collects every leaf ref.  Does not
@@ -388,19 +403,26 @@ async def plan_crawl(
         "plan_crawl finished",
         extra={"plugin": plugin.name, "leaf_count": len(current_refs)},
     )
-    return CrawlPlan(
-        record=top_record,
-        leaves=tuple(current_refs),
-        errors=tuple(errors),
+    # This cast is where the deliberately erased chain interior meets the sink.
+    return cast(
+        "CrawlPlan[AsyncPlanLeafRefT]",
+        CrawlPlan(
+            record=top_record,
+            leaves=tuple(current_refs),
+            errors=tuple(errors),
+        ),
     )
 
 
 async def execute_plan(
-    plan: CrawlPlan,
-    plugin: AsyncCrawlPlugin,
+    plan: CrawlPlan[AsyncPlannedLeafRefT],
+    plugin: AsyncCrawlPlugin[Any, AsyncPlannedLeafRefT, AsyncLeafRecordT],
     client: AsyncHttpClientProtocol,
     config: RunConfig,
-    on_leaf: Callable[[object, object], Awaitable[None]] | None = None,
+    on_planned_leaf: (
+        AsyncOnPlannedLeafCallback[AsyncLeafRecordT, AsyncPlannedLeafRefT]
+        | None
+    ) = None,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> RunResult:
     """Run Phase 3 (leaf fetching) asynchronously against an existing CrawlPlan.
@@ -413,9 +435,10 @@ async def execute_plan(
                      If the plan was already narrowed with ``CrawlPlan.limited_to()``,
                      both that cap and ``config.leaf_limit`` apply independently —
                      the tighter of the two wins.
-        on_leaf:     Optional async callback receiving ``(leaf_record, leaf_ref)``
-                     after each successful consume.  Note: second argument is the
-                     **leaf ref**, not a parent record (see ADR-011).
+        on_planned_leaf: Optional async callback receiving
+                     ``(leaf_record, leaf_ref)`` after each successful consume.
+                     The second argument is the **leaf ref**, not a parent
+                     record; ADR-015 enforces ADR-011's distinction in types.
         on_progress: Optional **synchronous** callback receiving
                      ``(leaves_done, total_leaves)`` after each leaf attempt
                      (success or failure).  Called from inside concurrent leaf
@@ -440,8 +463,8 @@ async def execute_plan(
                                 plugin error propagates.
         TypeError:               ``on_progress`` is an async callable; only
                                 synchronous callables are supported.
-        asyncio.CancelledError: A leaf consume or ``on_leaf`` callback, or an
-                                ``on_progress`` callback, was cancelled.
+        asyncio.CancelledError: A leaf consume or ``on_planned_leaf`` callback,
+                                or an ``on_progress`` callback, was cancelled.
         BaseException:          Other fatal BaseException subclasses raised
                                 by a leaf task propagate unchanged.
     """
@@ -469,12 +492,12 @@ async def execute_plan(
     done_count = 0
 
     async def _process_leaf(
-        i: int, leaf_ref: object
+        i: int, leaf_ref: AsyncPlannedLeafRefT
     ) -> tuple[bool, bool, list[str]] | BaseException:
         """Returns (consumed, persisted, leaf_errors).
 
         consumed=True  when sink.consume() succeeded.
-        persisted=True when consumed AND on_leaf succeeded (or no callback).
+        persisted=True when consumed AND on_planned_leaf succeeded (or no callback).
         leaf_errors    holds at most one error string.
         """
         nonlocal done_count
@@ -536,16 +559,16 @@ async def execute_plan(
                 # original exception unchanged.
                 return exc
 
-            if on_leaf is not None:
+            if on_planned_leaf is not None:
                 try:
-                    await on_leaf(leaf_record, leaf_ref)
+                    await on_planned_leaf(leaf_record, leaf_ref)
                     done_count += 1
                     if (progress_error := _fire_progress()) is not None:
                         return progress_error
                     return (True, True, [])
                 except Exception as exc:
                     logger.warning(
-                        "on_leaf callback failed — ref[%d] error=%s",
+                        "on_planned_leaf callback failed — ref[%d] error=%s",
                         i,
                         exc,
                         extra={

@@ -113,6 +113,42 @@ class _MockAsyncPlugin:
 _typed_async_plugin: AsyncCrawlPlugin = _MockAsyncPlugin([])
 
 
+class _PreciseAsyncSource:
+    async def discover(
+        self, client: AsyncHttpClientProtocol
+    ) -> Sequence[Ref[dict[str, str]]]:
+        return (Ref("https://typed.example/top", {"kind": "top"}),)
+
+
+class _PreciseAsyncExpander:
+    async def expand(
+        self,
+        ref: Ref[dict[str, str]],
+        client: AsyncHttpClientProtocol,
+    ) -> Expansion[_DemoRecord, dict[str, int]]:
+        return Expansion(
+            _DemoRecord(),
+            (Ref(f"{ref.url}/leaf", {"leaf_id": 7}),),
+        )
+
+
+class _PreciseAsyncSink:
+    async def consume(
+        self,
+        ref: Ref[dict[str, int]],
+        client: AsyncHttpClientProtocol,
+    ) -> _DemoLeafRecord:
+        return _DemoLeafRecord(str(ref.raw["leaf_id"]), ref.url)
+
+
+@dataclass(frozen=True)
+class _PreciseAsyncPlugin:
+    name: str = "precise_async_plugin"
+    source: _PreciseAsyncSource = _PreciseAsyncSource()
+    expanders: Sequence[_PreciseAsyncExpander] = (_PreciseAsyncExpander(),)
+    sink: _PreciseAsyncSink = _PreciseAsyncSink()
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -140,6 +176,24 @@ def config() -> RunConfig:
 @pytest.fixture()
 def top_ref() -> Ref:
     return Ref(url="https://demo.example.com/top/1")
+
+
+@pytest.fixture()
+def two_level_async_plugin() -> _MockAsyncPlugin:
+    section = Ref(url="https://demo.example.com/section/1")
+    leaf = Ref(url="https://demo.example.com/leaf/1")
+
+    class _RootExpander:
+        async def expand(self, ref: object, client: object) -> Expansion:
+            return Expansion(_DemoRecord("root"), (section,))
+
+    class _SectionExpander:
+        async def expand(self, ref: object, client: object) -> Expansion:
+            return Expansion(_DemoRecord("direct-parent"), (leaf,))
+
+    plugin = _MockAsyncPlugin([])
+    plugin.expanders = (_RootExpander(), _SectionExpander())
+    return plugin
 
 
 @pytest.mark.parametrize("entry_point", ["async_run_crawl", "execute_plan"])
@@ -802,6 +856,28 @@ class TestPhase3Concurrency:
 
 
 class TestMultiExpander:
+    async def test_parent_context_comes_from_second_expander(
+        self,
+        top_ref: Ref,
+        config: RunConfig,
+        two_level_async_plugin: _MockAsyncPlugin,
+    ) -> None:
+        parents: list[object] = []
+
+        # ParentT is deliberately object because ADR-015 erases chain interiors.
+        async def on_leaf(record: _DemoLeafRecord, parent: object) -> None:
+            parents.append(parent)
+
+        result = await async_run_crawl(
+            top_ref,
+            two_level_async_plugin,
+            None,  # type: ignore[arg-type]
+            config,
+            on_leaf=on_leaf,
+        )
+        assert result.leaves_consumed == 1
+        assert parents == [_DemoRecord("direct-parent")]
+
     async def test_all_leaves_reached(
         self,
         top_ref: Ref,
@@ -1113,6 +1189,31 @@ class TestPlanCrawl:
 
 
 class TestExecutePlan:
+    async def test_precise_plan_leaf_type_flows_to_callback(self) -> None:
+        plugin = _PreciseAsyncPlugin()
+        plan = await plan_crawl(
+            Ref("https://typed.example/top", {"kind": "top"}),
+            plugin,
+            None,  # type: ignore[arg-type]
+        )
+        leaf_ref: Ref[dict[str, int]] = plan.leaves[0]
+        seen: list[tuple[_DemoLeafRecord, Ref[dict[str, int]]]] = []
+
+        async def on_planned_leaf(
+            record: _DemoLeafRecord, ref: Ref[dict[str, int]]
+        ) -> None:
+            seen.append((record, ref))
+
+        await execute_plan(
+            plan,
+            plugin,
+            None,  # type: ignore[arg-type]
+            RunConfig(),
+            on_planned_leaf=on_planned_leaf,
+        )
+        assert leaf_ref.raw["leaf_id"] == 7
+        assert seen == [(_DemoLeafRecord("7", leaf_ref.url), leaf_ref)]
+
     async def test_returns_run_result(
         self, top_ref: Ref, plugin: _MockAsyncPlugin
     ) -> None:
@@ -1145,7 +1246,13 @@ class TestExecutePlan:
         async def on_leaf(record: object, ref: object) -> None:
             calls.append((record, ref))
 
-        await execute_plan(plan, plugin, None, RunConfig(), on_leaf=on_leaf)  # type: ignore[arg-type]
+        await execute_plan(
+            plan,
+            plugin,
+            None,  # type: ignore[arg-type]
+            RunConfig(),
+            on_planned_leaf=on_leaf,
+        )
         assert len(calls) == 3
         for _, ref in calls:
             assert isinstance(ref, Ref)
@@ -1410,7 +1517,7 @@ class TestExecutePlan:
                 plugin,
                 None,  # type: ignore[arg-type]
                 RunConfig(),
-                on_leaf=interrupting_callback,
+                on_planned_leaf=interrupting_callback,
             )
 
         assert exc_info.value is interruption
@@ -1449,7 +1556,11 @@ class TestExecutePlan:
             raise RuntimeError("db exploded")
 
         result = await execute_plan(
-            plan, plugin, None, RunConfig(), on_leaf=bad_callback  # type: ignore[arg-type]
+            plan,
+            plugin,
+            None,  # type: ignore[arg-type]
+            RunConfig(),
+            on_planned_leaf=bad_callback,
         )
         assert result.leaves_consumed == 3
         assert result.leaves_persisted == 0
@@ -1613,7 +1724,7 @@ class TestExecutePlan:
             p,
             None,  # type: ignore[arg-type]
             RunConfig(),
-            on_leaf=failing_callback,
+            on_planned_leaf=failing_callback,
             on_progress=lambda d, t: progress_calls.append((d, t)),
         )
         assert progress_calls == [(1, 1)]
@@ -1638,7 +1749,7 @@ class TestExecutePlan:
                 plugin,
                 None,  # type: ignore[arg-type]
                 RunConfig(),
-                on_leaf=cancelled_callback,
+                on_planned_leaf=cancelled_callback,
                 on_progress=lambda done, total: progress_calls.append(
                     (done, total)
                 ),
@@ -1647,7 +1758,7 @@ class TestExecutePlan:
         assert exc_info.value is cancellation
         assert progress_calls == [(1, 1)]
         assert execute_plan.__doc__ is not None
-        assert "consume or ``on_leaf``" in execute_plan.__doc__
+        assert "consume or ``on_planned_leaf``" in execute_plan.__doc__
 
     async def test_plan_crawl_then_execute_plan_roundtrip(
         self, top_ref: Ref, plugin: _MockAsyncPlugin

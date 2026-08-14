@@ -20,6 +20,7 @@ chosen over the alternatives.
 | [ADR-011](adr-011-curl-cffi-cloudflare-bypass.md) | curl-cffi as the Cloudflare-Bypass HTTP Backend | Accepted |
 | [ADR-012](adr-012-session-contract-boundary.md) | Session Contract Boundary in `SyncPolicyBase` | Accepted |
 | [ADR-014](adr-014-http-client-protocols.md) | Structural HTTP Client Protocols | Accepted |
+| [ADR-015](adr-015-generic-ses-protocols.md) | Generic SES Protocol Types | Proposed |
 
 ## Format
 

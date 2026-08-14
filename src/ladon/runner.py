@@ -22,15 +22,18 @@ The plan/execute split (v0.3):
   ``execute_plan_sync`` runs Phase 3 against an existing plan.
   ``run_crawl`` remains a self-contained Phase 1+3 entry point with the
   original ``on_leaf(leaf_record, parent_record)`` contract.
-  ``execute_plan_sync``'s ``on_leaf`` receives ``(leaf_record, leaf_ref)``
-  per ADR-011 — different from ``run_crawl``'s contract.
+  ``execute_plan_sync``'s ``on_planned_leaf`` receives
+  ``(leaf_record, leaf_ref)`` per ADR-011 and ADR-015 — different from
+  ``run_crawl``'s contract.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable, Generic, cast
+
+from typing_extensions import TypeVar
 
 from ladon.networking.protocols import SyncHttpClientProtocol
 from ladon.plugins.errors import (
@@ -41,6 +44,14 @@ from ladon.plugins.errors import (
     PartialExpansionError,
 )
 from ladon.plugins.protocol import CrawlPlugin
+
+LeafRefT = TypeVar("LeafRefT", default=object)
+LeafRecordT = TypeVar("LeafRecordT", default=object)
+ParentT = TypeVar("ParentT", default=object)
+PlannedLeafRefT = TypeVar("PlannedLeafRefT", default=object)
+
+OnLeafCallback = Callable[[LeafRecordT, ParentT], None]
+OnPlannedLeafCallback = Callable[[LeafRecordT, PlannedLeafRefT], None]
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +86,7 @@ def log_leaf_exception(
 
 
 @dataclass(frozen=True)
-class CrawlPlan:
+class CrawlPlan(Generic[LeafRefT]):
     """Immutable output of ``plan_crawl_sync()`` / ``plan_crawl()``.
 
     Carries the top-level record, all leaf refs collected during Phase 1
@@ -85,10 +96,12 @@ class CrawlPlan:
     """
 
     record: object
-    leaves: tuple[object, ...]
+    leaves: tuple[LeafRefT, ...]
     errors: tuple[str, ...]
 
-    def excluding(self, predicate: Callable[[object], bool]) -> CrawlPlan:
+    def excluding(
+        self, predicate: Callable[[LeafRefT], bool]
+    ) -> CrawlPlan[LeafRefT]:
         """Return a new plan with leaves for which predicate is True removed."""
         return CrawlPlan(
             record=self.record,
@@ -96,7 +109,7 @@ class CrawlPlan:
             errors=self.errors,
         )
 
-    def limited_to(self, n: int) -> CrawlPlan:
+    def limited_to(self, n: int) -> CrawlPlan[LeafRefT]:
         """Return a new plan capped at the first n leaves.
 
         ``n`` must be a positive integer; ``0`` and negative values raise
@@ -127,9 +140,10 @@ class RunConfig:
     no limit. ``run_plugin()`` applies the same cap independently to every
     root discovered by its source.
     ``async_concurrency`` bounds the number of concurrent leaf-processing
-    slots in ``async_run_crawl`` — each slot covers the full
-    ``sink.consume()`` + ``on_leaf`` pair, so slow callbacks reduce effective
-    fetch concurrency.  Ignored by the sync ``run_crawl()``.
+    slots in ``async_run_crawl()`` and ``execute_plan()`` — each slot covers
+    the full ``sink.consume()`` + callback pair, so slow ``on_leaf`` or
+    ``on_planned_leaf`` callbacks reduce effective fetch concurrency. Ignored
+    by the synchronous runners.
     """
 
     leaf_limit: int = 0
@@ -147,12 +161,13 @@ class RunResult:
     """Outcome of a crawl run — returned by run_crawl(), execute_plan_sync(), and execute_plan().
 
     ``leaves_consumed`` counts leaves for which ``sink.consume()`` succeeded,
-    regardless of whether the ``on_leaf`` callback also succeeded.
+    regardless of whether the applicable ``on_leaf`` or ``on_planned_leaf``
+    callback also succeeded.
 
     ``leaves_persisted`` counts leaves for which the full pipeline succeeded:
-    ``sink.consume()`` completed *and* the ``on_leaf`` callback completed
-    without raising.  When no callback is supplied, ``leaves_persisted``
-    equals ``leaves_consumed`` (the pipeline trivially succeeds after consume).
+    ``sink.consume()`` completed *and* the applicable callback completed
+    without raising. When no callback is supplied, ``leaves_persisted`` equals
+    ``leaves_consumed`` (the pipeline trivially succeeds after consume).
 
     ``leaves_failed`` counts leaves for which ``sink.consume()`` raised a
     non-fatal exception. Callback failures are NOT included here — derive them
@@ -226,10 +241,10 @@ class PluginRunResult:
 
 def run_crawl(
     top_ref: object,
-    plugin: CrawlPlugin,
+    plugin: CrawlPlugin[Any, Any, LeafRecordT],
     client: SyncHttpClientProtocol,
     config: RunConfig,
-    on_leaf: Callable[[object, object], None] | None = None,
+    on_leaf: OnLeafCallback[LeafRecordT, object] | None = None,
 ) -> RunResult:
     """Run a single top-level ref through the plugin adapter stack.
 
@@ -408,10 +423,10 @@ def run_crawl(
 
 
 def run_plugin(
-    plugin: CrawlPlugin,
+    plugin: CrawlPlugin[Any, Any, LeafRecordT],
     client: SyncHttpClientProtocol,
     config: RunConfig,
-    on_leaf: Callable[[object, object], None] | None = None,
+    on_leaf: OnLeafCallback[LeafRecordT, object] | None = None,
 ) -> PluginRunResult:
     """Discover and run every top-level ref exposed by a sync plugin.
 
@@ -462,9 +477,9 @@ def run_plugin(
 
 def plan_crawl_sync(
     top_ref: object,
-    plugin: CrawlPlugin,
+    plugin: CrawlPlugin[Any, LeafRefT, Any],
     client: SyncHttpClientProtocol,
-) -> CrawlPlan:
+) -> CrawlPlan[LeafRefT]:
     """Run Phase 1 (tree traversal) synchronously and return a CrawlPlan.
 
     Traverses all expanders in order and collects every leaf ref.  Does not
@@ -522,19 +537,25 @@ def plan_crawl_sync(
         "plan_crawl_sync finished",
         extra={"plugin": plugin.name, "leaf_count": len(current_refs)},
     )
-    return CrawlPlan(
-        record=top_record,
-        leaves=tuple(current_refs),
-        errors=tuple(errors),
+    # This cast is where the deliberately erased chain interior meets the sink.
+    return cast(
+        "CrawlPlan[LeafRefT]",
+        CrawlPlan(
+            record=top_record,
+            leaves=tuple(current_refs),
+            errors=tuple(errors),
+        ),
     )
 
 
 def execute_plan_sync(
-    plan: CrawlPlan,
-    plugin: CrawlPlugin,
+    plan: CrawlPlan[PlannedLeafRefT],
+    plugin: CrawlPlugin[Any, PlannedLeafRefT, LeafRecordT],
     client: SyncHttpClientProtocol,
     config: RunConfig,
-    on_leaf: Callable[[object, object], None] | None = None,
+    on_planned_leaf: (
+        OnPlannedLeafCallback[LeafRecordT, PlannedLeafRefT] | None
+    ) = None,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> RunResult:
     """Run Phase 3 (leaf fetching) against an existing CrawlPlan.
@@ -546,9 +567,10 @@ def execute_plan_sync(
         config:      Run-level configuration (leaf_limit; async_concurrency ignored).
                      If the plan was already narrowed with ``CrawlPlan.limited_to()``,
                      both caps apply independently — the tighter of the two wins.
-        on_leaf:     Optional callback receiving ``(leaf_record, leaf_ref)``
-                     after each successful consume.  Note: second argument is the
-                     **leaf ref**, not a parent record (see ADR-011).
+        on_planned_leaf: Optional callback receiving
+                     ``(leaf_record, leaf_ref)`` after each successful consume.
+                     The second argument is the **leaf ref**, not a parent
+                     record; ADR-015 enforces ADR-011's distinction in types.
         on_progress: Optional callback receiving ``(leaves_done, total_leaves)``
                      after each leaf attempt (success or failure).  Ordinary
                      ``Exception`` subclasses raised by this callback are logged
@@ -568,7 +590,7 @@ def execute_plan_sync(
         AssetDownloadError: Raised from the Sink. This explicitly fatal
                             plugin error propagates.
         BaseException:      KeyboardInterrupt and other fatal errors raised by
-                            the Sink or ``on_leaf`` propagate unchanged.
+                            the Sink or ``on_planned_leaf`` propagate unchanged.
     """
     leaves = plan.leaves
     if config.leaf_limit > 0:
@@ -638,14 +660,14 @@ def execute_plan_sync(
 
         leaves_consumed += 1
 
-        if on_leaf is not None:
+        if on_planned_leaf is not None:
             try:
-                on_leaf(leaf_record, leaf_ref)
+                on_planned_leaf(leaf_record, leaf_ref)
                 leaves_persisted += 1
             except Exception as exc:
                 errors.append(f"ref[{i}] callback failed: {exc}")
                 logger.warning(
-                    "on_leaf callback failed — ref[%d] error=%s",
+                    "on_planned_leaf callback failed — ref[%d] error=%s",
                     i,
                     exc,
                     extra={

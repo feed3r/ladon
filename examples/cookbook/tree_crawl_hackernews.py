@@ -1,7 +1,7 @@
 """Crawl Hacker News comments using the external ladon-hackernews adapter."""
 
 # --8<-- [start:example]
-from typing import Protocol, cast
+from operator import attrgetter
 
 from ladon_hackernews import HNPlugin
 
@@ -15,12 +15,10 @@ from ladon import (
 )
 
 
-class HasId(Protocol):
-    id: object
-
-
 def print_comment(comment: object, story: object) -> None:
-    print(cast(HasId, story).id, cast(HasId, comment).id)
+    # Full precision requires ladon-hackernews to narrow its object signatures.
+    get_id = attrgetter("id")
+    print(get_id(story), get_id(comment))
 
 
 def run_example() -> list[RunResult]:
