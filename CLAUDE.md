@@ -95,6 +95,12 @@ pre-commit run --all-files    # run all hooks at once
   reference the tracking issue
 - External contributors must sign the CLA (enforced automatically by the
   CLA Assistant bot on every PR)
+- Merge PRs with **"Create a merge commit"**, not squash or rebase —
+  individual commits stay visible in `main`'s history as their own
+  logical units instead of being flattened into one per PR. Squash and
+  rebase both remain enabled in the repo's GitHub settings; this is a
+  documented convention, not a platform-enforced restriction, so it
+  applies to whoever is doing the merging, deliberately, each time.
 
 ## Fork workflow
 
